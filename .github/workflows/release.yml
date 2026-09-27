@@ -1,4 +1,4 @@
-# Собирает Compatibility-Layer SDK на стороне GitHub и кладёт JAR в релиз.
+# Собирает SDK на стороне GitHub и прикладывает к релизу: полный zip проекта и SDK.
 name: Сборка и релиз
 
 on:
@@ -24,8 +24,8 @@ jobs:
           java-version: "17"
       - name: Сборка SDK
         run: ./gradlew :sdk:build --no-daemon
-      - name: Имя файла по версии
-        id: name
+      - name: Артефакты
+        id: artifacts
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           SDK="Compatibility-Layer-SDK-${TAG#v}.zip"
@@ -33,11 +33,14 @@ jobs:
           cp sdk/build/libs/sdk.jar release-sdk/Compatibility-Layer-SDK/Compatibility-Layer-SDK.jar
           cp -R sdk/docs sdk/runtime sdk/tools release-sdk/Compatibility-Layer-SDK/
           cd release-sdk && zip -qr "../$SDK" Compatibility-Layer-SDK && cd ..
+          # Полный zip проекта ровно из коммита тега.
+          git archive --format=zip --prefix='questandgearandopenxr/' -o questandgearandopenxr.zip HEAD
           echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
       - name: В релиз
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          gh release view "${{ github.event.inputs.tag || github.ref_name }}" >/dev/null 2>&1 \
-            || gh release create "${{ github.event.inputs.tag || github.ref_name }}" --title "Compatibility-Layer ${{ github.event.inputs.tag || github.ref_name }}" --generate-notes
-          gh release upload "${{ github.event.inputs.tag || github.ref_name }}" "${{ steps.name.outputs.sdk }}" --clobber
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "GearVR / Quest / Compatibility-Layer ${TAG#v}" --generate-notes
+          gh release upload "$TAG" "${{ steps.artifacts.outputs.sdk }}" questandgearandopenxr.zip --clobber
