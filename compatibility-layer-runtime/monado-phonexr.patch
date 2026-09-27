@@ -1,0 +1,473 @@
+diff --git a/build.gradle b/build.gradle
+index e31a9be..261193b 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -23,7 +23,7 @@ buildscript {
+         eigenFetchVersion = '5.0.0'
+ 
+         // If you update this, must also update .gitlab-ci/config.yml
+-        buildToolsVersion = '34.0.0'
++        buildToolsVersion = '35.0.0'
+ 
+         // ktfmt version
+         ktfmtVersion = "0.53"
+@@ -77,7 +77,7 @@ spotless {
+ 
+ ext {
+     cmake_version = '3.22.1'
+-    ndk_version = '26.3.11579264'
++    ndk_version = '27.0.12077973'
+     // If you update this, must also update .gitlab-ci/config.yml
+     sharedCompileSdk = 35
+     sharedTargetSdk = 31
+diff --git a/src/xrt/drivers/android/android_prober.c b/src/xrt/drivers/android/android_prober.c
+index 7b647b6..84d0b83 100644
+--- a/src/xrt/drivers/android/android_prober.c
++++ b/src/xrt/drivers/android/android_prober.c
+@@ -71,7 +71,9 @@ android_prober_autoprobe(struct xrt_auto_prober *xap,
+ {
+ 	struct android_device *dd = android_device_create();
+ 	out_xdevs[0] = &dd->base;
+-	return 1;
++	out_xdevs[1] = android_hand_controller_create(true, dd->base.tracking_origin);
++	out_xdevs[2] = android_hand_controller_create(false, dd->base.tracking_origin);
++	return 3;
+ }
+ 
+ 
+diff --git a/src/xrt/drivers/android/android_sensors.c b/src/xrt/drivers/android/android_sensors.c
+index a705d90..b25dd49 100644
+--- a/src/xrt/drivers/android/android_sensors.c
++++ b/src/xrt/drivers/android/android_sensors.c
+@@ -14,6 +14,13 @@
+ 
+ #include "android_sensors.h"
+ 
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include "math/m_api.h"
+ #include "util/u_debug.h"
+ #include "util/u_device.h"
+ #include "util/u_distortion_mesh.h"
+@@ -450,3 +457,374 @@ android_device_create(void)
+ 
+ 	return d;
+ }
++
++/*
++ * PhoneXR hand-controller bridge.
++ * Cardboard Hands sends the latest MediaPipe gesture state over localhost UDP.
++ * Keeping the transport local avoids Android background IPC and network access.
++ */
++enum phone_hand_input
++{
++	PH_X_CLICK,
++	PH_X_TOUCH,
++	PH_Y_CLICK,
++	PH_Y_TOUCH,
++	PH_MENU_CLICK,
++	PH_A_CLICK,
++	PH_A_TOUCH,
++	PH_B_CLICK,
++	PH_B_TOUCH,
++	PH_SYSTEM_CLICK,
++	PH_SQUEEZE,
++	PH_TRIGGER_TOUCH,
++	PH_TRIGGER,
++	PH_STICK_CLICK,
++	PH_STICK_TOUCH,
++	PH_STICK,
++	PH_THUMBREST,
++	PH_GRIP_POSE,
++	PH_AIM_POSE,
++	PH_INPUT_COUNT,
++};
++
++struct phone_hand_state
++{
++	bool present;
++	bool fist;
++	bool index;
++	bool thumb;
++	float x;
++	float y;
++	float z;
++	float from_x;
++	float from_y;
++	float from_z;
++	float qx;
++	float qy;
++	float qz;
++	float qw;
++	uint32_t buttons;
++	float stick_x;
++	float stick_y;
++	uint64_t transition_ns;
++	uint64_t transition_duration_ns;
++	uint64_t received_ns;
++};
++
++struct phone_hand_controller
++{
++	struct xrt_device base;
++	bool left;
++};
++
++static struct phone_hand_state phone_hands[2];
++static int phone_hand_socket = -1;
++// Bit 0: camera position tracking (6DoF). Bit 1: plain hand tracking, no gesture buttons.
++static uint32_t phone_hand_flags = 1;
++
++static void
++phone_hand_sample_position(const struct phone_hand_state *state, uint64_t now, float *x, float *y, float *z)
++{
++	if (state->transition_duration_ns == 0 || now >= state->transition_ns + state->transition_duration_ns) {
++		*x = state->x;
++		*y = state->y;
++		*z = state->z;
++		return;
++	}
++	float t = (float)(now - state->transition_ns) / (float)state->transition_duration_ns;
++	// Smoothstep avoids a visible kick at either end of every camera update.
++	t = t * t * (3.0f - 2.0f * t);
++	*x = state->from_x + (state->x - state->from_x) * t;
++	*y = state->from_y + (state->y - state->from_y) * t;
++	*z = state->from_z + (state->z - state->from_z) * t;
++}
++
++static void
++phone_hand_update_state(struct phone_hand_state *state,
++                        bool present,
++                        bool fist,
++                        bool index,
++                        bool thumb,
++                        float x,
++                        float y,
++                        float z,
++                        float qx,
++                        float qy,
++                        float qz,
++                        float qw,
++                        uint64_t now)
++{
++	float current_x = x;
++	float current_y = y;
++	float current_z = z;
++	uint64_t duration = time_s_to_ns(0.02);
++	if (state->present && state->received_ns != 0) {
++		phone_hand_sample_position(state, now, &current_x, &current_y, &current_z);
++		duration = now - state->received_ns;
++		if (duration < time_s_to_ns(0.012)) {
++			duration = time_s_to_ns(0.012);
++		} else if (duration > time_s_to_ns(0.05)) {
++			duration = time_s_to_ns(0.05);
++		}
++	}
++	state->present = present;
++	state->fist = fist;
++	state->index = index;
++	state->thumb = thumb;
++	state->from_x = current_x;
++	state->from_y = current_y;
++	state->from_z = current_z;
++	state->x = x;
++	state->y = y;
++	state->z = z;
++	state->qx = qx;
++	state->qy = qy;
++	state->qz = qz;
++	state->qw = qw;
++	state->transition_ns = now;
++	state->transition_duration_ns = duration;
++	state->received_ns = now;
++}
++
++static void
++phone_hand_open_socket(void)
++{
++	if (phone_hand_socket >= 0) {
++		return;
++	}
++	phone_hand_socket = socket(AF_INET, SOCK_DGRAM, 0);
++	if (phone_hand_socket < 0) {
++		return;
++	}
++	int flags = fcntl(phone_hand_socket, F_GETFL, 0);
++	(void)fcntl(phone_hand_socket, F_SETFL, flags | O_NONBLOCK);
++	struct sockaddr_in address = {0};
++	address.sin_family = AF_INET;
++	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++	address.sin_port = htons(42424);
++	if (bind(phone_hand_socket, (struct sockaddr *)&address, sizeof(address)) != 0) {
++		close(phone_hand_socket);
++		phone_hand_socket = -1;
++	}
++}
++
++static void
++phone_hand_receive(void)
++{
++	phone_hand_open_socket();
++	if (phone_hand_socket < 0) {
++		return;
++	}
++	char packet[256];
++	ssize_t length;
++	while ((length = recv(phone_hand_socket, packet, sizeof(packet) - 1, 0)) > 0) {
++		packet[length] = '\0';
++		int lp, lf, li, lt, rp, rf, ri, rt, lb, rb, fl;
++		float lx, ly, lz, lqx, lqy, lqz, lqw, rx, ry, rz, rqx, rqy, rqz, rqw;
++		float lsx, lsy, rsx, rsy;
++		int count = sscanf(packet,
++		                   "PH5 %d %d %d %d %f %f %f %f %f %f %f %d %f %f "
++		                   "%d %d %d %d %f %f %f %f %f %f %f %d %f %f %d",
++		                   &lp, &lf, &li, &lt, &lx, &ly, &lz, &lqx, &lqy, &lqz, &lqw, &lb, &lsx, &lsy,
++		                   &rp, &rf, &ri, &rt, &rx, &ry, &rz, &rqx, &rqy, &rqz, &rqw, &rb, &rsx, &rsy, &fl);
++		if (count == 29) {
++			uint64_t now = os_monotonic_get_ns();
++			phone_hand_update_state(&phone_hands[0], lp != 0, lf != 0, li != 0, lt != 0, lx, ly, lz,
++			                        lqx, lqy, lqz, lqw, now);
++			phone_hand_update_state(&phone_hands[1], rp != 0, rf != 0, ri != 0, rt != 0, rx, ry, rz,
++			                        rqx, rqy, rqz, rqw, now);
++			phone_hands[0].buttons = (uint32_t)lb;
++			phone_hands[1].buttons = (uint32_t)rb;
++			phone_hands[0].stick_x = lsx;
++			phone_hands[0].stick_y = lsy;
++			phone_hands[1].stick_x = rsx;
++			phone_hands[1].stick_y = rsy;
++			phone_hand_flags = (uint32_t)fl;
++			continue;
++		}
++		count = sscanf(packet,
++		                   "PH4 %d %d %d %d %f %f %f %f %f %f %f %d %d %d %d %d %f %f %f %f %f %f %f %d %d",
++		                   &lp, &lf, &li, &lt, &lx, &ly, &lz, &lqx, &lqy, &lqz, &lqw, &lb,
++		                   &rp, &rf, &ri, &rt, &rx, &ry, &rz, &rqx, &rqy, &rqz, &rqw, &rb, &fl);
++		if (count == 25) {
++			uint64_t now = os_monotonic_get_ns();
++			phone_hand_update_state(&phone_hands[0], lp != 0, lf != 0, li != 0, lt != 0, lx, ly, lz,
++			                        lqx, lqy, lqz, lqw, now);
++			phone_hand_update_state(&phone_hands[1], rp != 0, rf != 0, ri != 0, rt != 0, rx, ry, rz,
++			                        rqx, rqy, rqz, rqw, now);
++			phone_hands[0].buttons = (uint32_t)lb;
++			phone_hands[1].buttons = (uint32_t)rb;
++			phone_hand_flags = (uint32_t)fl;
++			continue;
++		}
++		count = sscanf(packet,
++		                   "PH3 %d %d %d %d %f %f %f %f %f %f %f %d %d %d %d %d %f %f %f %f %f %f %f %d",
++		                   &lp, &lf, &li, &lt, &lx, &ly, &lz, &lqx, &lqy, &lqz, &lqw, &lb,
++		                   &rp, &rf, &ri, &rt, &rx, &ry, &rz, &rqx, &rqy, &rqz, &rqw, &rb);
++		if (count == 24) {
++			uint64_t now = os_monotonic_get_ns();
++			phone_hand_update_state(&phone_hands[0], lp != 0, lf != 0, li != 0, lt != 0, lx, ly, lz,
++			                        lqx, lqy, lqz, lqw, now);
++			phone_hand_update_state(&phone_hands[1], rp != 0, rf != 0, ri != 0, rt != 0, rx, ry, rz,
++			                        rqx, rqy, rqz, rqw, now);
++			phone_hands[0].buttons = (uint32_t)lb;
++			phone_hands[1].buttons = (uint32_t)rb;
++			continue;
++		}
++		count = sscanf(packet,
++		                   "PH2 %d %d %d %d %f %f %f %f %f %f %f %d %d %d %d %f %f %f %f %f %f %f",
++		                   &lp, &lf, &li, &lt, &lx, &ly, &lz, &lqx, &lqy, &lqz, &lqw,
++		                   &rp, &rf, &ri, &rt, &rx, &ry, &rz, &rqx, &rqy, &rqz, &rqw);
++		if (count == 22) {
++			uint64_t now = os_monotonic_get_ns();
++			phone_hand_update_state(&phone_hands[0], lp != 0, lf != 0, li != 0, lt != 0, lx, ly, lz,
++			                        lqx, lqy, lqz, lqw, now);
++			phone_hand_update_state(&phone_hands[1], rp != 0, rf != 0, ri != 0, rt != 0, rx, ry, rz,
++			                        rqx, rqy, rqz, rqw, now);
++		} else {
++			count = sscanf(packet, "PH1 %d %d %d %d %f %f %f %d %d %d %d %f %f %f", &lp, &lf, &li,
++			               &lt, &lx, &ly, &lz, &rp, &rf, &ri, &rt, &rx, &ry, &rz);
++			if (count == 14) {
++				uint64_t now = os_monotonic_get_ns();
++				phone_hand_update_state(&phone_hands[0], lp != 0, lf != 0, li != 0, lt != 0, lx, ly, lz,
++				                        0.0f, 0.0f, 0.0f, 1.0f, now);
++				phone_hand_update_state(&phone_hands[1], rp != 0, rf != 0, ri != 0, rt != 0, rx, ry, rz,
++				                        0.0f, 0.0f, 0.0f, 1.0f, now);
++			}
++		}
++	}
++}
++
++static inline struct phone_hand_controller *
++phone_hand(struct xrt_device *xdev)
++{
++	return (struct phone_hand_controller *)xdev;
++}
++
++static void
++phone_hand_destroy(struct xrt_device *xdev)
++{
++	u_device_free(xdev);
++}
++
++static xrt_result_t
++phone_hand_update_inputs(struct xrt_device *xdev)
++{
++	phone_hand_receive();
++	struct phone_hand_controller *controller = phone_hand(xdev);
++	struct phone_hand_state *state = &phone_hands[controller->left ? 0 : 1];
++	const uint64_t now = os_monotonic_get_ns();
++	bool active = state->present && now - state->received_ns < time_s_to_ns(0.35);
++	bool both_fists = phone_hands[0].present && phone_hands[1].present && phone_hands[0].fist &&
++	                  phone_hands[1].fist && now - phone_hands[0].received_ns < time_s_to_ns(0.35) &&
++	                  now - phone_hands[1].received_ns < time_s_to_ns(0.35);
++	for (uint32_t i = 0; i < xdev->input_count; i++) {
++		xdev->inputs[i].active = active;
++		xdev->inputs[i].timestamp = now;
++	}
++	// Joy-Con bits, see JoyConButtons.kt in PhoneXR.
++	uint32_t pad = active ? state->buttons : 0;
++	uint32_t other_pad = phone_hands[controller->left ? 1 : 0].buttons;
++	bool primary = active && (state->thumb || (pad & 0x1) != 0);
++	bool secondary = active && (state->index || (pad & 0x2) != 0);
++	bool fist = active && ((state->fist && !both_fists) || (pad & 0x4) != 0);
++	bool squeeze = fist || (pad & 0x8) != 0;
++	// The Touch profile has a menu button only on the left controller.
++	xdev->inputs[PH_MENU_CLICK].value.boolean = controller->left && ((pad | other_pad) & 0x10) != 0;
++	xdev->inputs[PH_STICK_CLICK].value.boolean = (pad & 0x20) != 0;
++	xdev->inputs[PH_SYSTEM_CLICK].value.boolean = (pad & 0x40) != 0;
++	xdev->inputs[PH_X_CLICK].value.boolean = controller->left && primary;
++	xdev->inputs[PH_X_TOUCH].value.boolean = controller->left && primary;
++	xdev->inputs[PH_Y_CLICK].value.boolean = controller->left && secondary;
++	xdev->inputs[PH_Y_TOUCH].value.boolean = controller->left && secondary;
++	xdev->inputs[PH_A_CLICK].value.boolean = !controller->left && primary;
++	xdev->inputs[PH_A_TOUCH].value.boolean = !controller->left && primary;
++	xdev->inputs[PH_B_CLICK].value.boolean = !controller->left && secondary;
++	xdev->inputs[PH_B_TOUCH].value.boolean = !controller->left && secondary;
++	xdev->inputs[PH_SQUEEZE].value.vec1.x = squeeze ? 1.0f : 0.0f;
++	xdev->inputs[PH_TRIGGER_TOUCH].value.boolean = fist;
++	xdev->inputs[PH_TRIGGER].value.vec1.x = fist ? 1.0f : 0.0f;
++	// The Joy-Con stick walks; both fists stay as a fallback for a phone without a controller.
++	float stick_x = active ? state->stick_x : 0.0f;
++	float stick_y = active ? state->stick_y : 0.0f;
++	if (stick_x == 0.0f && stick_y == 0.0f && controller->left && both_fists) {
++		stick_y = 1.0f;
++	}
++	xdev->inputs[PH_STICK_TOUCH].value.boolean = stick_x != 0.0f || stick_y != 0.0f;
++	xdev->inputs[PH_STICK].value.vec2.x = stick_x;
++	xdev->inputs[PH_STICK].value.vec2.y = stick_y;
++	return XRT_SUCCESS;
++}
++
++static xrt_result_t
++phone_hand_get_pose(struct xrt_device *xdev,
++	                enum xrt_input_name name,
++	                int64_t at_timestamp_ns,
++	                struct xrt_space_relation *out_relation)
++{
++	(void)name;
++	(void)at_timestamp_ns;
++	phone_hand_receive();
++	struct phone_hand_controller *controller = phone_hand(xdev);
++	struct phone_hand_state *state = &phone_hands[controller->left ? 0 : 1];
++	uint64_t now = os_monotonic_get_ns();
++	float x, y, z;
++	phone_hand_sample_position(state, now, &x, &y, &z);
++	U_ZERO(out_relation);
++	out_relation->pose.orientation.x = state->qx;
++	out_relation->pose.orientation.y = state->qy;
++	out_relation->pose.orientation.z = state->qz;
++	out_relation->pose.orientation.w = state->qw == 0.0f ? 1.0f : state->qw;
++	// Keep the lower part of the camera image inside a comfortable controller range.
++	if ((phone_hand_flags & 1u) != 0) {
++		float mapped_y = y < 0.08f ? 0.08f : (y > 0.88f ? 0.88f : y);
++		out_relation->pose.position.x = (x - 0.5f) * 1.15f;
++		out_relation->pose.position.y = (0.60f - mapped_y) * 0.68f;
++		out_relation->pose.position.z = -0.35f - z * 0.45f;
++	} else {
++		// 3DoF: the hand hangs off a fixed shoulder, pointed wherever the controller points.
++		struct xrt_vec3 forearm = {0.0f, 0.0f, -0.32f};
++		struct xrt_vec3 rotated;
++		math_quat_rotate_vec3(&out_relation->pose.orientation, &forearm, &rotated);
++		out_relation->pose.position.x = (controller->left ? -0.18f : 0.18f) + rotated.x;
++		out_relation->pose.position.y = -0.20f + rotated.y;
++		out_relation->pose.position.z = -0.10f + rotated.z;
++	}
++	if (state->present && now - state->received_ns < time_s_to_ns(0.35)) {
++		out_relation->relation_flags = (enum xrt_space_relation_flags)(
++		    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_POSITION_VALID_BIT |
++		    XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
++	}
++	return XRT_SUCCESS;
++}
++
++struct xrt_device *
++android_hand_controller_create(bool left, struct xrt_tracking_origin *origin)
++{
++	struct phone_hand_controller *controller =
++	    U_DEVICE_ALLOCATE(struct phone_hand_controller, U_DEVICE_ALLOC_TRACKING_NONE, PH_INPUT_COUNT, 0);
++	u_device_populate_function_pointers(&controller->base, phone_hand_get_pose, phone_hand_destroy);
++	controller->base.update_inputs = phone_hand_update_inputs;
++	controller->base.name = XRT_DEVICE_TOUCH_CONTROLLER;
++	controller->base.device_type = left ? XRT_DEVICE_TYPE_LEFT_HAND_CONTROLLER : XRT_DEVICE_TYPE_RIGHT_HAND_CONTROLLER;
++	controller->base.tracking_origin = origin;
++	controller->base.supported.orientation_tracking = true;
++	controller->base.supported.position_tracking = true;
++	controller->left = left;
++	const enum xrt_input_name names[PH_INPUT_COUNT] = {
++	    XRT_INPUT_TOUCH_X_CLICK,       XRT_INPUT_TOUCH_X_TOUCH,        XRT_INPUT_TOUCH_Y_CLICK,
++	    XRT_INPUT_TOUCH_Y_TOUCH,       XRT_INPUT_TOUCH_MENU_CLICK,     XRT_INPUT_TOUCH_A_CLICK,
++	    XRT_INPUT_TOUCH_A_TOUCH,       XRT_INPUT_TOUCH_B_CLICK,        XRT_INPUT_TOUCH_B_TOUCH,
++	    XRT_INPUT_TOUCH_SYSTEM_CLICK,  XRT_INPUT_TOUCH_SQUEEZE_VALUE,  XRT_INPUT_TOUCH_TRIGGER_TOUCH,
++	    XRT_INPUT_TOUCH_TRIGGER_VALUE, XRT_INPUT_TOUCH_THUMBSTICK_CLICK, XRT_INPUT_TOUCH_THUMBSTICK_TOUCH,
++	    XRT_INPUT_TOUCH_THUMBSTICK,    XRT_INPUT_TOUCH_THUMBREST_TOUCH, XRT_INPUT_TOUCH_GRIP_POSE,
++	    XRT_INPUT_TOUCH_AIM_POSE,
++	};
++	for (uint32_t i = 0; i < PH_INPUT_COUNT; i++) {
++		controller->base.inputs[i].name = names[i];
++		controller->base.inputs[i].active = false;
++	}
++	snprintf(controller->base.str, XRT_DEVICE_NAME_LEN, "PhoneXR %s Hand", left ? "Left" : "Right");
++	snprintf(controller->base.serial, XRT_DEVICE_NAME_LEN, "PhoneXR-%s", left ? "Left" : "Right");
++	return &controller->base;
++}
+diff --git a/src/xrt/drivers/android/android_sensors.h b/src/xrt/drivers/android/android_sensors.h
+index b4b691e..345853c 100644
+--- a/src/xrt/drivers/android/android_sensors.h
++++ b/src/xrt/drivers/android/android_sensors.h
+@@ -50,6 +50,9 @@ struct android_device
+ struct android_device *
+ android_device_create(void);
+ 
++struct xrt_device *
++android_hand_controller_create(bool left, struct xrt_tracking_origin *origin);
++
+ 
+ /*
+  *
+diff --git a/src/xrt/targets/compatibility_layer_android/build.gradle b/src/xrt/targets/compatibility_layer_android/build.gradle
+index 97df566..9294d13 100644
+--- a/src/xrt/targets/compatibility_layer_android/build.gradle
++++ b/src/xrt/targets/compatibility_layer_android/build.gradle
+@@ -258,7 +258,7 @@ android {
+             inProcessBaseConfig(it, "Monado In Process (Debugging)")
+         }
+         outOfProcess {
+-            outOfProcessBaseConfig(it, "Monado XR")
++            outOfProcessBaseConfig(it, "PhoneXR Runtime")
+         }
+     }
+     hilt {
+diff --git a/src/xrt/targets/compatibility_layer_android/src/main/AndroidManifest.xml b/src/xrt/targets/compatibility_layer_android/src/main/AndroidManifest.xml
+index 59d97ed..694a5ac 100644
+--- a/src/xrt/targets/compatibility_layer_android/src/main/AndroidManifest.xml
++++ b/src/xrt/targets/compatibility_layer_android/src/main/AndroidManifest.xml
+@@ -44,9 +44,11 @@
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
+ 
++    <!-- multiArch installs the 32-bit runtime next to the 64-bit one, so 32-bit games find it too. -->
+     <application
+         android:name="org.freedesktop.monado.compatibility_layer_runtime.MonadoCompatibilityLayerApplication"
+         android:allowBackup="true"
++        android:multiArch="true"
+         android:icon="@mipmap/ic_launcher"
+         android:roundIcon="@mipmap/ic_launcher_round"
+         android:label="@string/app_name"

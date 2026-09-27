@@ -12,34 +12,21 @@ build/
 .externalNativeBuild/
 .cxx/
 
-# Xcode / iOS build output
-PhoneXR-iOS/DerivedData*/
-PhoneXR-iOS/xcode-*/
-PhoneXR-iOS/build*/
-PhoneXR-iOS/livecontainer-stage/
-*.ipa
-*.xcuserstate
-
 # Бинарники (выкладываются в GitHub Releases)
 *.apk
 *.idsig
-*.dmg
 VR-Android/
-desktop/dist/
 
-# Большие локальные сборки и исходники сторонних проектов
+# Локальные сборки и исходники сторонних проектов
 Builds/
-openxr-runtime/monado/
+compatibility-layer-runtime/monado/
 
 # Документация
 *.md
 
 # Сборка переходника Gear VR
 gearvr-shim/build/
-
-# Oculus Mobile SDK (VrApi) — только локально, не выкладывать
+gearvr-shim/build32/
 gearvr-shim/third_party/
 
-gearvr-shim/build32/
-app/src/main/assets/daydream/
 __pycache__/

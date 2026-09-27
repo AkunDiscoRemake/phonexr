@@ -21,7 +21,7 @@ gear_vr_style()
 	return global().product != Product::quest;
 }
 
-// Device ids in enumeration order, and the OpenXR hand behind each (0 left, 1 right).
+// Device ids in enumeration order, and the Compatibility-Layer hand behind each (0 left, 1 right).
 int
 hand_of(ovrDeviceID id)
 {

@@ -1,8 +1,8 @@
 // VR mode, head tracking, frame timing and frame submission of the VrApi layer.
 //
-// OpenXR wants xrWaitFrame -> xrBeginFrame -> xrEndFrame in strict order, while VrApi games either
+// Compatibility-Layer wants xrWaitFrame -> xrBeginFrame -> xrEndFrame in strict order, while VrApi games either
 // ask for a display time and submit, or call WaitFrame / BeginFrame / SubmitFrame2. Whatever the
-// game calls first opens the OpenXR frame and the submit closes it.
+// game calls first opens the Compatibility-Layer frame and the submit closes it.
 #include "vrapi_internal.h"
 
 #include <GLES3/gl3.h>
@@ -91,7 +91,7 @@ close_frame(ovrMobile *ovr, const std::vector<ProjectionLayer> &layers)
 	ovr->frame_real = false;
 }
 
-// Opens an OpenXR frame for the given VrApi frame index unless one is open already.
+// Opens an Compatibility-Layer frame for the given VrApi frame index unless one is open already.
 // Must be called without the global lock: xrWaitFrame blocks until the next frame slot.
 void
 open_frame(ovrMobile *ovr, uint64_t index)

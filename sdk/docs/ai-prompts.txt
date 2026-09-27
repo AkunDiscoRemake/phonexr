@@ -3,7 +3,7 @@
 
 Unity
 -----
-Создай Android VR-проект Unity для PhoneXR, а не для Meta Quest. Используй OpenXR Plugin,
+Создай Android VR-проект Unity для PhoneXR, а не для Meta Quest. Используй Compatibility-Layer Plugin,
 рендеринг stereo multipass или multiview, Android arm64-v8a и minimum SDK 29. Добавь action map для
 head pose, двух Oculus Touch-совместимых контроллеров, trigger, squeeze, primary, secondary, menu и
 thumbstick. Проект обязан работать в 3DoF и 6DoF: при отсутствии position tracking не перемещай
@@ -15,7 +15,7 @@ C# код, настройки Unity по пунктам и проверочны�
 
 Godot 4
 -------
-Создай проект Godot 4 для PhoneXR под Android arm64-v8a. Используй OpenXRInterface, XROrigin3D,
+Создай проект Godot 4 для PhoneXR под Android arm64-v8a. Используй CompatibilityLayerInterface, XROrigin3D,
 XRCamera3D и два XRController3D с action map, совместимым с Oculus Touch. Реализуй безопасный fallback
 между 6DoF и 3DoF. Добавь GDScript-клиент PacketPeerUDP для PH5 на 127.0.0.1:42425: удаляй старые
 датаграммы, разбирай последнюю, публикуй сигналы pinch, palm_to_face и Joy-Con buttons. Добавь Android
@@ -25,7 +25,7 @@ build template и элементы из sdk/docs/manifest.txt. Не исполь
 Lua
 ---
 Создай минимальный Android VR-слой для Lua-приложения под PhoneXR. Рендеринг и позы получай через
-OpenXR в C/C++, а runtime/phonexr_input.h оберни в Lua API: phonexr.poll() возвращает таблицу left,
+Compatibility-Layer в C/C++, а runtime/phonexr_input.h оберни в Lua API: phonexr.poll() возвращает таблицу left,
 right, flags; каждая рука содержит present, x/y/z, quaternion, buttons, stick, pinch и palm_to_face.
 API не должен блокировать кадр и должен возвращать nil без новых данных. Покажи C binding, Lua-модуль,
 цикл обновления, Android CMake и манифест из sdk/docs/manifest.txt. Поддержи 3DoF и 6DoF, arm64-v8a,

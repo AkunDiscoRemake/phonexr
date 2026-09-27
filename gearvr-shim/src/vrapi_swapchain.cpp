@@ -1,8 +1,8 @@
 // Texture swap chains of the VrApi layer.
 //
 // A VrApi game allocates a chain, renders into whichever image it likes and names that index at
-// submit time. OpenXR hands out images in its own order, so chain images are plain GL textures of
-// the game and the chosen one is blitted into an OpenXR swapchain when the frame is submitted.
+// submit time. Compatibility-Layer hands out images in its own order, so chain images are plain GL textures of
+// the game and the chosen one is blitted into an Compatibility-Layer swapchain when the frame is submitted.
 #include "vrapi_internal.h"
 
 #include <GLES3/gl3.h>
@@ -19,7 +19,7 @@ constexpr GLenum kFramebufferSrgb = 0x8DB9; // GL_FRAMEBUFFER_SRGB_EXT
 constexpr GLenum kRg16 = 0x822C;           // GL_RG16_EXT
 constexpr GLenum kSrgbAlpha = 0x8C42;      // GL_SRGB_ALPHA_EXT
 
-// All chains alive, so their OpenXR copies can be dropped together with the session.
+// All chains alive, so their Compatibility-Layer copies can be dropped together with the session.
 std::vector<ovrTextureSwapChain *> &
 chains()
 {
@@ -211,7 +211,7 @@ supported(int64_t format)
 	return std::find(formats.begin(), formats.end(), format) != formats.end();
 }
 
-// Picks the OpenXR format for a chain. Gear VR showed 8-bit eye buffers as they are, while OpenXR
+// Picks the Compatibility-Layer format for a chain. Gear VR showed 8-bit eye buffers as they are, while Compatibility-Layer
 // treats GL_RGBA8 as linear; such images go to an sRGB swapchain with conversion switched off.
 int64_t
 choose_format(int64_t app_format, bool want_raw, bool &raw)
@@ -440,7 +440,7 @@ vrapi_CreateTextureSwapChain(ovrTextureType type, ovrTextureFormat format, int w
 	return create_chain(type, legacy_format(format), width, height, levels, 2, buffered ? 3 : 1);
 }
 
-// Video surfaces need a compositor that samples SurfaceTexture directly; OpenXR has no such layer.
+// Video surfaces need a compositor that samples SurfaceTexture directly; Compatibility-Layer has no such layer.
 ovrTextureSwapChain *
 vrapi_CreateAndroidSurfaceSwapChain(int, int)
 {

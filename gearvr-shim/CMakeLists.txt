@@ -6,25 +6,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(PROJECT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(OPENXR_INCLUDE ${PROJECT_ROOT}/openxr-runtime/monado/src/external/openxr_includes)
+set(COMPATIBILITY_LAYER_INCLUDE ${PROJECT_ROOT}/compatibility-layer-runtime/monado/src/external/compatibility_layer_includes)
 # 32-bit games (armeabi-v7a) get their own adapter and the official Khronos 32-bit loader.
 if(ANDROID_ABI STREQUAL "armeabi-v7a")
 	set(ABI_SUFFIX 32)
 else()
 	set(ABI_SUFFIX "")
 endif()
-set(OPENXR_LOADER ${PROJECT_ROOT}/app/src/main/assets/libopenxr_loader${ABI_SUFFIX}.so)
+set(COMPATIBILITY_LAYER_LOADER ${PROJECT_ROOT}/compatibility-layer-runtime/loaders/libcompatibility_layer_loader${ABI_SUFFIX}.so)
 set(WARNINGS -Wall -Wextra -Werror -Wno-missing-field-initializers)
 
-# OpenXR backend of the Gear VR adapter, linked into libvrapi.so.
+# Compatibility-Layer backend of the Gear VR adapter, linked into libvrapi.so.
 add_library(phonexr_xr_backend STATIC src/xr_backend.cpp)
-target_include_directories(phonexr_xr_backend PUBLIC src ${OPENXR_INCLUDE})
+target_include_directories(phonexr_xr_backend PUBLIC src ${COMPATIBILITY_LAYER_INCLUDE})
 target_compile_options(phonexr_xr_backend PRIVATE ${WARNINGS})
 
-add_library(openxr_loader SHARED IMPORTED)
-set_target_properties(openxr_loader PROPERTIES IMPORTED_LOCATION ${OPENXR_LOADER})
+add_library(compatibility_layer_loader SHARED IMPORTED)
+set_target_properties(compatibility_layer_loader PROPERTIES IMPORTED_LOCATION ${COMPATIBILITY_LAYER_LOADER})
 
-target_link_libraries(phonexr_xr_backend PUBLIC openxr_loader EGL GLESv3 log android)
+target_link_libraries(phonexr_xr_backend PUBLIC compatibility_layer_loader EGL GLESv3 log android)
 
 # VrApi headers from the Oculus Mobile SDK (local copy, not in git).
 set(VRAPI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/VrApi CACHE PATH "Oculus Mobile SDK VrApi folder")

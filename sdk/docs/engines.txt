@@ -5,11 +5,11 @@ PhoneXR: Lua, Unity и Godot
 -------------
 PhoneXR запускает трекинг перед игрой и отправляет последнее состояние рук/Joy-Con по UDP:
 127.0.0.1:42425. Формат строки PH5 описан в protocol.txt. Для обычных VR-поз и кнопок лучше
-использовать OpenXR; UDP нужен для сырых жестов (pinch, palm_to_face, положение ладони).
+использовать Compatibility-Layer; UDP нужен для сырых жестов (pinch, palm_to_face, положение ладони).
 
 Unity
 -----
-1. Включите OpenXR Plugin и Android/ARM64.
+1. Включите Compatibility-Layer Plugin и Android/ARM64.
 2. Добавьте профиль Oculus Touch / Khronos Simple Controller.
 3. Для сырых жестов создайте UdpClient(42425), читайте только последний пакет в Update и
    разбирайте PH5 по protocol.txt. Чтение делайте в отдельном потоке, Unity API вызывайте в Update.
@@ -17,8 +17,8 @@ Unity
 
 Godot 4
 -------
-1. Включите OpenXR и экспорт Android arm64-v8a.
-2. Действия рук назначьте через OpenXR action map.
+1. Включите Compatibility-Layer и экспорт Android arm64-v8a.
+2. Действия рук назначьте через Compatibility-Layer action map.
 3. Для PH5 используйте PacketPeerUDP: bind(42425, "127.0.0.1"), в _process() удалите старые
    пакеты и разберите последний get_packet().get_string_from_ascii().
 4. Добавьте фрагменты manifest.txt в Android build template.
@@ -39,6 +39,6 @@ LuaSocket подключите runtime/phonexr_input.h и отдайте phonexr
 Quest и Pico
 ------------
 Собственные или легально распространяемые APK Quest/Pico можно положить в магазин PhoneXR.
-PhoneXR сам скачает APK, уберёт обязательность аппаратных фич гарнитуры, подставит свой OpenXR
+PhoneXR сам скачает APK, уберёт обязательность аппаратных фич гарнитуры, подставит свой Compatibility-Layer
 loader, подпишет и откроет системное подтверждение установки. Закрытый Meta/Pico runtime и
 проверки покупки не обходятся; такие игры требуют официального порта разработчика.

@@ -1,20 +1,20 @@
 PhoneXR SDK
 ===========
 
-Набор для переноса и разработки OpenXR-игр под PhoneXR — VR на обычном телефоне
+Набор для переноса и разработки Compatibility-Layer-игр под PhoneXR — VR на обычном телефоне
 (Cardboard + рантайм Monado + трекинг рук камерой + Joy-Con вместо контроллеров).
 
 Состав:
 
   tools/phonexr_port.py   Готовит чужой APK к запуску на PhoneXR: правит манифест,
-                          подменяет OpenXR loader, выравнивает и подписывает.
+                          подменяет Compatibility-Layer loader, выравнивает и подписывает.
   src/                    Библиотека PhoneXRInput (Kotlin/JVM): сырые данные рук и Joy-Con.
   runtime/phonexr_input.h То же самое для игр на C/C++, один заголовок.
   docs/porting.txt        Как перенести игру и что перенести нельзя.
   docs/protocol.txt       Формат потока данных PhoneXR.
   docs/manifest.txt       Что нужно в манифесте своей игры, чтобы не было чёрного экрана.
   docs/engines.txt        Подключение Unity, Godot 4 и Lua-движков.
-  docs/api.txt            PhoneXR Developer API: OpenXR, PH5, lifecycle и публикация.
+  docs/api.txt            PhoneXR Developer API: Compatibility-Layer, PH5, lifecycle и публикация.
   docs/ai-prompts.txt     Полные промты для генерации PhoneXR-проектов.
 
 Сборка библиотеки и тесты:

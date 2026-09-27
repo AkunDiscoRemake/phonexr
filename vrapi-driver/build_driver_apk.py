@@ -2,7 +2,7 @@
 """
 Собирает PhoneXR VrApi Driver — пакет com.oculus.systemdriver, который загрузчик libvrapi.so внутри
 игр Gear VR / Quest открывает сам. В нём DriverLoader и собственный VrApi PhoneXR
-(gearvr-shim, цель phonexr_vrapi) с загрузчиком OpenXR: игры VrApi идут без патча.
+(gearvr-shim, цель phonexr_vrapi) с загрузчиком Compatibility-Layer: игры VrApi идут без патча.
 
   python3 vrapi-driver/build_driver_apk.py
 Сначала соберите gearvr-shim (build и build32, цель phonexr_vrapi).
@@ -18,7 +18,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.join(ROOT, "vrapi-driver")
 SDK = os.environ.get("ANDROID_HOME") or os.path.expanduser("~/Library/Android/sdk")
-OUTPUT = os.path.join(ROOT, "app", "src", "main", "assets", "runtime", "phonexr-vrapi-driver.apk")
+OUTPUT = os.path.join(ROOT, "vrapi-driver", "phonexr-vrapi-driver.apk")
 
 
 def build_tool(name):
@@ -33,12 +33,12 @@ def build_tool(name):
 def main():
     android_jar = sorted(glob.glob(os.path.join(SDK, "platforms", "android-*", "android.jar")))[-1]
     shim = os.path.join(ROOT, "gearvr-shim", "build", "assets")
-    assets = os.path.join(ROOT, "app", "src", "main", "assets")
+    assets = os.path.join(ROOT, "compatibility-layer-runtime", "loaders")
     libraries = {
         "lib/arm64-v8a/libphonexr_vrapi.so": os.path.join(shim, "libphonexr_vrapi.so"),
-        "lib/arm64-v8a/libopenxr_loader.so": os.path.join(assets, "libopenxr_loader.so"),
+        "lib/arm64-v8a/libcompatibility_layer_loader.so": os.path.join(assets, "libcompatibility_layer_loader.so"),
         "lib/armeabi-v7a/libphonexr_vrapi.so": os.path.join(shim, "libphonexr_vrapi32.so"),
-        "lib/armeabi-v7a/libopenxr_loader.so": os.path.join(assets, "libopenxr_loader32.so"),
+        "lib/armeabi-v7a/libcompatibility_layer_loader.so": os.path.join(assets, "libcompatibility_layer_loader32.so"),
     }
     for path in libraries.values():
         if not os.path.exists(path):

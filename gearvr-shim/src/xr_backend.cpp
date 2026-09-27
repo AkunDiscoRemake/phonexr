@@ -80,8 +80,8 @@ use_32bit_runtime(JavaVM *vm, jobject activity)
 	}
 	std::string library;
 	std::string cache;
-	const char *packages[] = {"org.freedesktop.monado.openxr_runtime.out_of_process",
-	                          "org.freedesktop.monado.openxr_runtime.in_process"};
+	const char *packages[] = {"org.freedesktop.monado.compatibility_layer_runtime.out_of_process",
+	                          "org.freedesktop.monado.compatibility_layer_runtime.in_process"};
 	jclass context_class = env->GetObjectClass(activity);
 	jobject manager = env->CallObjectMethod(
 	    activity, env->GetMethodID(context_class, "getPackageManager", "()Landroid/content/pm/PackageManager;"));
@@ -99,7 +99,7 @@ use_32bit_runtime(JavaVM *vm, jobject activity)
 		jclass info_class = env->GetObjectClass(info);
 		std::string source = java_string(
 		    env, env->GetObjectField(info, env->GetFieldID(info_class, "sourceDir", "Ljava/lang/String;")));
-		std::string candidate = source.substr(0, source.find_last_of('/')) + "/lib/arm/libopenxr_monado.so";
+		std::string candidate = source.substr(0, source.find_last_of('/')) + "/lib/arm/libcompatibility_layer_monado.so";
 		if (access(candidate.c_str(), R_OK) == 0) {
 			library = candidate;
 			break;
@@ -156,7 +156,7 @@ XrBackend::initialize(JavaVM *vm, jobject activity)
 		auto initialize_loader = lookup<XrResult (*)(const XrLoaderInitInfoBaseHeaderKHR *)>(
 		    XR_NULL_HANDLE, "xrInitializeLoaderKHR");
 		if (initialize_loader == nullptr) {
-			LOG("OpenXR loader has no xrInitializeLoaderKHR");
+			LOG("Compatibility-Layer loader has no xrInitializeLoaderKHR");
 			return false;
 		}
 		result = initialize_loader(reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR *>(&loader));
@@ -219,7 +219,7 @@ XrBackend::initialize(JavaVM *vm, jobject activity)
 		recommended_height_ = views[0].recommendedImageRectHeight;
 	}
 
-	// OpenXR requires this query before a GLES session can be created.
+	// Compatibility-Layer requires this query before a GLES session can be created.
 	XrGraphicsRequirementsOpenGLESKHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_ES_KHR};
 	auto graphics_requirements = lookup<XrResult (*)(XrInstance, XrSystemId, XrGraphicsRequirementsOpenGLESKHR *)>(
 	    instance_, "xrGetOpenGLESGraphicsRequirementsKHR");
@@ -230,7 +230,7 @@ XrBackend::initialize(JavaVM *vm, jobject activity)
 	graphics_requirements(instance_, system_, &requirements);
 
 	hands_ = {path(instance_, "/user/hand/left"), path(instance_, "/user/hand/right")};
-	LOG("OpenXR ready, eye buffer %ux%u", recommended_width_, recommended_height_);
+	LOG("Compatibility-Layer ready, eye buffer %ux%u", recommended_width_, recommended_height_);
 	return create_actions();
 }
 

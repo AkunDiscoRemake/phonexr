@@ -150,7 +150,7 @@ vrapi_Initialize(const ovrInitParms *initParms)
 	// block both. vrapi_EnterVrMode, which comes once the window is there, waits for it instead.
 	// Its own thread, with no looper: for a NativeActivity, Monado's instance creation pumps the
 	// calling thread's looper and would hand the game's window events to the game while waiting.
-	// The thread stays for the life of the process: the OpenXR loader unloads and reloads the runtime
+	// The thread stays for the life of the process: the Compatibility-Layer loader unloads and reloads the runtime
 	// while starting, and a thread that ran runtime code must not exit and run its destructors then.
 	JavaVM *vm = state.vm;
 	jobject activity = state.activity;

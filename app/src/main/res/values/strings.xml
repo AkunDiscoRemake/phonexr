@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="joycon_service_label">PhoneXR Joy‑Con</string>
-    <string name="joycon_service_description">Передаёт кнопки Joy‑Con в OpenXR-игры как кнопки VR-контроллеров. Читает только нажатия на Joy‑Con, остальные клавиши не трогает.</string>
-</resources>

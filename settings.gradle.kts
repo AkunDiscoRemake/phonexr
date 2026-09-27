@@ -14,7 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "CardboardHands"
-include(":app")
+rootProject.name = "PhoneXR-Compatibility-Layer"
 include(":sdk")
-include(":orangehanding")

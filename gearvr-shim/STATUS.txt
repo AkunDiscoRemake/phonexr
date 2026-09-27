@@ -4,20 +4,20 @@
 Игры Gear VR рисуют через VrApi (libvrapi.so) из Oculus Mobile SDK. Этот libvrapi.so —
 только загрузчик: он ищет системный драйвер Oculus (com.oculus.systemdriver), который был
 лишь на телефонах Samsung, и без него игра не стартует. Переходник собирает свой
-libvrapi.so с теми же экспортами, что у оригинала, и выполняет вызовы через OpenXR на
+libvrapi.so с теми же экспортами, что у оригинала, и выполняет вызовы через Compatibility-Layer на
 рантайме PhoneXR (Monado). Проверки «это Samsung» в нём нет, vrapi_Initialize проходит
 на любом телефоне с PhoneXR.
 
 Устройство
 ----------
-src/xr_backend.{h,cpp}   OpenXR: instance, сессия на EGL-контексте игры, кадры, свопчейны,
+src/xr_backend.{h,cpp}   Compatibility-Layer: instance, сессия на EGL-контексте игры, кадры, свопчейны,
                          голова и глаза, контроллеры, перевод времени CLOCK_MONOTONIC <-> XrTime.
 src/vrapi_system.cpp     vrapi_Initialize/Shutdown, свойства и статусы системы, трекинг-пространства,
                          Guardian, производительность, заглушки Vulkan и прочих экспортов.
 src/vrapi_frame.cpp      vrapi_EnterVrMode/LeaveVrMode, GetPredictedDisplayTime, GetPredictedTracking(2),
                          WaitFrame/BeginFrame, SubmitFrame2 и старый SubmitFrame, PollEvent.
 src/vrapi_swapchain.cpp  vrapi_CreateTextureSwapChain(…4): GL-текстуры игры; при отправке кадра
-                         выбранная картинка копируется (glBlitFramebuffer) в свопчейн OpenXR.
+                         выбранная картинка копируется (glBlitFramebuffer) в свопчейн CompatibilityLayer.
 src/vrapi_input.cpp      контроллеры: в режиме Gear VR правый контроллер PhoneXR = Gear VR Controller
                          (курок, тачпад = стик + A, назад = B); в режиме Quest — два Touch.
 
@@ -40,7 +40,7 @@ src/vrapi_input.cpp      контроллеры: в режиме Gear VR пра�
 
 Перенос игры:
   python3 sdk/tools/phonexr_port.py игра.apk
-Инструмент заменит lib/arm64-v8a/libvrapi.so переходником, добавит libopenxr_loader.so,
+Инструмент заменит lib/arm64-v8a/libvrapi.so переходником, добавит libcompatibility_layer_loader.so,
 поправит манифест и подпишет APK.
 
 Заголовки VrApi
@@ -54,8 +54,8 @@ src/vrapi_input.cpp      контроллеры: в режиме Gear VR пра�
 * На телефоне с настоящей игрой переходник ещё не запускался. Собирается без предупреждений,
   но цвет, тайминги кадров и поведение Unity/Unreal нужно проверять на устройстве.
 * 32-битные игры (armeabi-v7a, armeabi) собираются отдельной копией переходника
-  (libvrapi32.so) с официальным 32-битным OpenXR loader Khronos 1.1.63
-  (app/src/main/assets/libopenxr_loader32.so). На устройстве 32-битный режим не проверен.
+  (libvrapi32.so) с официальным 32-битным Compatibility-Layer loader Khronos 1.1.63
+  (app/src/main/assets/libcompatibility_layer_loader32.so). На устройстве 32-битный режим не проверен.
 * Только OpenGL ES. Vulkan-игры vrapi_Initialize отклоняет.
 * Из слоёв рисуется только проекционный (Projection2 и слои старого SubmitFrame).
   Cylinder, Cube, Equirect, LoadingIcon, FishEye пропускаются: пропадут экраны загрузки,
@@ -85,8 +85,8 @@ load32Ext) с (Context игры, Context драйвера, 5 int[, long]) и п�
 «функция по имени». Ею загрузчик по именам (vrapi_Initialize, vrapi_SubmitFrame2, … — те же, что
 экспорты) заполняет свою таблицу; подпись пакета не проверяется.
 Цель phonexr_vrapi собирает тот же VrApi + src/vrapi_driver.cpp (get_proc и JNI procAddress),
-vrapi-driver/build_driver_apk.py упаковывает его с загрузчиком OpenXR (arm64 и arm) в
-PhoneXR VrApi Driver → app/src/main/assets/runtime/phonexr-vrapi-driver.apk.
+vrapi-driver/build_driver_apk.py упаковывает его с загрузчиком Compatibility-Layer (arm64 и arm) в
+PhoneXR VrApi Driver → vrapi-driver/phonexr-vrapi-driver.apk.
 Игры с targetSdk 30+ не видят чужие пакеты: PhoneXR запускает их через GameLauncher рантайма,
 тот — через GameLauncher драйвера, и игра получает URI обоих пакетов, что делает их видимыми.
 Проверено с оригинальным загрузчиком 1.1.50 из SDK: arm64 и armeabi-v7a — vrapi_Initialize = 0.

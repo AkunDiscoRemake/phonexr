@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Готовит Android-сборку OpenXR-игры к запуску на PhoneXR.
+Готовит Android-сборку Compatibility-Layer-игры к запуску на PhoneXR.
 
 Что делает:
-  * правит бинарный AndroidManifest.xml так, чтобы игра видела OpenXR-брокер и ставилась на телефон;
-  * подменяет libopenxr_loader.so на сборку PhoneXR (по желанию);
-  * для игр Gear VR подменяет libvrapi.so переходником VrApi -> OpenXR (gearvr-shim);
+  * правит бинарный AndroidManifest.xml так, чтобы игра видела Compatibility-Layer-брокер и ставилась на телефон;
+  * подменяет libcompatibility_layer_loader.so на сборку PhoneXR (по желанию);
+  * для игр Gear VR подменяет libvrapi.so переходником VrApi -> Compatibility-Layer (gearvr-shim);
   * выравнивает и подписывает APK;
   * сообщает, если игра опирается на закрытый рантайм Meta и работать не будет.
 
@@ -128,7 +128,7 @@ def patch_manifest(manifest: bytes):
             current = axml.value(slot)
             if slot[0] == Axml.TYPE_INT_DEC and current > MAX_TARGET_SDK:
                 axml.set_value(slot, MAX_TARGET_SDK)
-                changes.append(f"targetSdk {current} -> {MAX_TARGET_SDK} (игра снова видит OpenXR-брокер)")
+                changes.append(f"targetSdk {current} -> {MAX_TARGET_SDK} (игра снова видит Compatibility-Layer-брокер)")
         if "isSplitRequired" in attributes:
             slot = attributes["isSplitRequired"]
             if slot[0] == Axml.TYPE_INT_BOOLEAN and axml.value(slot) != 0:
@@ -174,20 +174,20 @@ def repack(source, destination, loaders, vrapis):
             if name == "AndroidManifest.xml":
                 data, manifest_changes = patch_manifest(data)
                 changes += manifest_changes
-            elif suffix is not None and name == f"lib/{abi}/libopenxr_loader.so" and loaders.get(suffix):
+            elif suffix is not None and name == f"lib/{abi}/libcompatibility_layer_loader.so" and loaders.get(suffix):
                 data = loaders[suffix]
-                changes.append(f"OpenXR loader ({bits}) заменён на сборку PhoneXR")
+                changes.append(f"Compatibility-Layer loader ({bits}) заменён на сборку PhoneXR")
             elif suffix is not None and name == f"lib/{abi}/libvrapi.so" and vrapis.get(suffix):
                 data = vrapis[suffix]
-                changes.append(f"libvrapi.so ({bits}) заменён переходником PhoneXR (VrApi -> OpenXR)")
+                changes.append(f"libvrapi.so ({bits}) заменён переходником PhoneXR (VrApi -> Compatibility-Layer)")
             method = zipfile.ZIP_STORED if name.endswith(".so") else entry.compress_type
             output.writestr(zipfile.ZipInfo(name, date_time=entry.date_time), data, compress_type=method)
-        # Игре Gear VR переходнику нужен OpenXR loader рядом с libvrapi.so.
+        # Игре Gear VR переходнику нужен Compatibility-Layer loader рядом с libvrapi.so.
         for abi, suffix in ABIS.items():
-            loader_path = f"lib/{abi}/libopenxr_loader.so"
+            loader_path = f"lib/{abi}/libcompatibility_layer_loader.so"
             if f"lib/{abi}/libvrapi.so" in names and loader_path not in names and loaders.get(suffix) and vrapis.get(suffix):
                 output.writestr(zipfile.ZipInfo(loader_path), loaders[suffix], compress_type=zipfile.ZIP_STORED)
-                changes.append(f"добавлен OpenXR loader PhoneXR ({abi})")
+                changes.append(f"добавлен Compatibility-Layer loader PhoneXR ({abi})")
     return changes, meta_libs, abis
 
 
@@ -202,29 +202,28 @@ def build_tool(name):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Готовит OpenXR-игру к запуску на PhoneXR")
+    parser = argparse.ArgumentParser(description="Готовит Compatibility-Layer-игру к запуску на PhoneXR")
     parser.add_argument("apk", help="исходный APK")
     parser.add_argument("-o", "--output", help="куда сохранить готовый APK")
     parser.add_argument("--keystore", help="PKCS12 с ключом подписи", default=None)
     parser.add_argument("--keystore-pass", default="android")
     parser.add_argument("--key-alias", default="androiddebugkey")
-    parser.add_argument("--loader", help="libopenxr_loader.so для подмены", default=None)
+    parser.add_argument("--loader", help="libcompatibility_layer_loader.so для подмены", default=None)
     parser.add_argument("--vrapi", help="libvrapi.so переходника для игр Gear VR", default=None)
     parser.add_argument("--check", action="store_true", help="только проверить, ничего не записывать")
     arguments = parser.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    project = os.path.dirname(root)
-    assets = os.path.join(project, "app/src/main/assets")
-    keystore = arguments.keystore or os.path.join(assets, "phonexr-signing.p12")
+    assets = os.path.join(root, "compatibility-layer-runtime", "loaders")
+    keystore = arguments.keystore or os.path.join(root, "compatibility-layer-runtime", "signing", "phonexr-signing.p12")
 
     def read(path):
         return open(path, "rb").read() if path and os.path.exists(path) else None
 
-    loader_path = arguments.loader or os.path.join(assets, "libopenxr_loader.so")
-    vrapi_path = arguments.vrapi or os.path.join(project, "gearvr-shim/build/assets/libvrapi.so")
-    loaders = {"": read(loader_path), "32": read(os.path.join(assets, "libopenxr_loader32.so"))}
-    vrapis = {"": read(vrapi_path), "32": read(os.path.join(project, "gearvr-shim/build/assets/libvrapi32.so"))}
+    loader_path = arguments.loader or os.path.join(assets, "libcompatibility_layer_loader.so")
+    vrapi_path = arguments.vrapi or os.path.join(root, "gearvr-shim/build/assets/libvrapi.so")
+    loaders = {"": read(loader_path), "32": read(os.path.join(assets, "libcompatibility_layer_loader32.so"))}
+    vrapis = {"": read(vrapi_path), "32": read(os.path.join(root, "gearvr-shim/build/assets/libvrapi32.so"))}
     output = arguments.output or arguments.apk.rsplit(".", 1)[0] + "-phonexr.apk"
 
     with tempfile.TemporaryDirectory() as workspace:
@@ -248,10 +247,10 @@ def main():
             suffix = "" if "arm64-v8a" in abis else "32"
             if not vrapis[suffix] or not loaders[suffix]:
                 print("\nЭто игра Gear VR (libvrapi.so). Для неё нужен собранный переходник")
-                print("(gearvr-shim/build/assets/libvrapi" + suffix + ".so) и OpenXR loader.")
+                print("(gearvr-shim/build/assets/libvrapi" + suffix + ".so) и Compatibility-Layer loader.")
                 print("Как собрать: gearvr-shim/STATUS.txt")
                 return 3
-            print("\nИгра Gear VR: запускается через переходник VrApi -> OpenXR.")
+            print("\nИгра Gear VR: запускается через переходник VrApi -> CompatibilityLayer.")
         if arguments.check:
             print("\nПроверка пройдена, файл не записан (--check).")
             return 0

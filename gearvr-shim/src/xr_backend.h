@@ -1,7 +1,7 @@
-// OpenXR side of the Gear VR adapter.
+// Compatibility-Layer side of the Gear VR adapter.
 //
 // Gear VR games talk to VrApi (libvrapi.so). The adapter replaces that library and turns each
-// VrApi call into OpenXR on the PhoneXR runtime (Monado). This file owns everything OpenXR:
+// VrApi call into Compatibility-Layer on the PhoneXR runtime (Monado). This file owns everything Compatibility-Layer:
 // instance, session, frame loop, eye swapchains, head tracking and controller input.
 // The VrApi-facing layer on top of it only converts structures.
 #pragma once
@@ -19,8 +19,8 @@
 // Extension functions (loader init, GLES requirements) are declared only with this set.
 #define XR_EXTENSION_PROTOTYPES
 #include <time.h>
-#include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
+#include <compatibility_layer/compatibility_layer.h>
+#include <compatibility_layer/compatibility_layer_platform.h>
 
 namespace phonexr {
 

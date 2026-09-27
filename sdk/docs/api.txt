@@ -1,11 +1,11 @@
 PhoneXR Developer API
 =====================
 
-PhoneXR-приложение строится под PhoneXR, а не под Quest. Основной графический API — OpenXR;
+PhoneXR-приложение строится под PhoneXR, а не под Quest. Основной графический API — Compatibility-Layer;
 дополнительный PhoneXR Input API сообщает сырые жесты и Joy-Con.
 
-1. OpenXR
-   Используйте стандартный Android OpenXR loader и профили Oculus Touch/Khronos Simple Controller.
+1. Compatibility-Layer
+   Используйте стандартный Android Compatibility-Layer loader и профили Oculus Touch/Khronos Simple Controller.
    PhoneXR Runtime предоставляет голову, левую/правую руку, позы, trigger, squeeze, A/X, B/Y,
    menu и стики. В манифест скопируйте обязательные элементы из manifest.txt.
 
@@ -21,7 +21,7 @@ PhoneXR-приложение строится под PhoneXR, а не под Que
 3. Жизненный цикл
    Пользователь запускает игру из PhoneXR. PhoneXR включает камеру и поток API до старта Activity.
    Игра открывает порт 42425 неблокирующе, всегда берёт последний пакет и продолжает работать через
-   OpenXR, если дополнительный поток временно недоступен.
+   Compatibility-Layer, если дополнительный поток временно недоступен.
 
 4. Совместимость
    Собирайте arm64-v8a, не требуйте конкретную модель гарнитуры, не встраивайте проверку магазина

@@ -1,8 +1,0 @@
-{
-  "jsonid": "vrdriver_manifest",
-  "alwaysActivate": true,
-  "name": "phonexr",
-  "directory": "",
-  "resourceOnly": false,
-  "hmd_presence": ["PhoneXR-HMD"]
-}

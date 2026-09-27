@@ -2,7 +2,7 @@
 //
 // libvrapi.so from the Oculus Mobile SDK is only a loader: it looks for the Oculus system driver
 // that shipped on Samsung phones and refuses to start without it. This library replaces it and
-// serves the same exports from OpenXR, so a Gear VR game starts on any phone with PhoneXR.
+// serves the same exports from Compatibility-Layer, so a Gear VR game starts on any phone with PhoneXR.
 // Structures come from the SDK headers (VrApi 1.1.50), their layout must match the game's.
 #pragma once
 
@@ -77,7 +77,7 @@ Global &global();
 bool backend_ready(bool wait);
 
 // ovrTextureSwapChain from VrApi.h. Images live in the game's GL context; at submit time the
-// requested image is copied into an OpenXR swapchain, which frees the game to pick any index.
+// requested image is copied into an Compatibility-Layer swapchain, which frees the game to pick any index.
 struct ChainCopy
 {
 	Swapchain *xr = nullptr;
@@ -97,7 +97,7 @@ struct ovrTextureSwapChain
 	std::vector<unsigned int> textures;
 	std::vector<bool> owned;
 	ovrTextureSamplerState sampler{};
-	// One OpenXR swapchain per eye slot, created on first submit of the current session.
+	// One Compatibility-Layer swapchain per eye slot, created on first submit of the current session.
 	std::array<phonexr::ChainCopy, 2> copies{};
 };
 
@@ -108,7 +108,7 @@ struct ovrMobile
 	unsigned int mode_flags = 0;
 	ovrTrackingSpace tracking_space = VRAPI_TRACKING_SPACE_LOCAL;
 
-	// The OpenXR frame that vrapi_GetPredictedDisplayTime / WaitFrame opened. frame_real is false
+	// The Compatibility-Layer frame that vrapi_GetPredictedDisplayTime / WaitFrame opened. frame_real is false
 	// while the session is not running yet and the frame only exists on the VrApi side.
 	std::mutex wait_lock;
 	bool frame_waited = false;

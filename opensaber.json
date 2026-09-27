@@ -1,7 +1,0 @@
-{
-  "name": "Open Saber",
-  "url": "https://github.com/samrat1games/phonexr/releases/download/v1.0.0/Open-Saber-0.6.0.apk",
-  "icon": "https://raw.githubusercontent.com/samrat1games/phonexr/main/icons/opensaber.png",
-  "description": "Ритм-игра с саблями на OpenXR (Godot). Руки или Joy‑Con с метками через трекинг PhoneXR. Версия 0.6.0.",
-  "size": 79768161
-}
