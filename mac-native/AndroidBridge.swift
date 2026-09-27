@@ -43,6 +43,12 @@ final class AndroidBridge: @unchecked Sendable {
         }
     }
 
+    /** Carries the phone's VR remote-control port (PhoneXR, loopback only) to this Mac over USB. */
+    func forwardRemote(serial: String, port: Int) throws {
+        let output = try run(adb, ["-s", serial, "forward", "tcp:\(port)", "tcp:\(port)"])
+        if output.lowercased().contains("error") { throw BridgeError.message(output) }
+    }
+
     func install(apk: URL, serial: String) throws -> String {
         let output = try run(adb, ["-s", serial, "install", "-r", apk.path])
         guard output.contains("Success") else { throw BridgeError.message(output) }

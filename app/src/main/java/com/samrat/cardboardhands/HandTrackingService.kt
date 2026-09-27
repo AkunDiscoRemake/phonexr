@@ -103,10 +103,10 @@ class HandTrackingService : LifecycleService() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             val provider = future.get()
-            // Markers are small in the image; they need a sharper frame than hands.
-            // A sharper frame gives steadier landmarks; markers need it anyway.
+            // The same frame as the VR home, where hands track well: a sharper frame gives steadier
+            // landmarks for hands further from the camera (640×480 made them jumpy in games).
             // Lite looks at a smaller frame: fewer pixels is the cheapest speed there is.
-            val size = android.util.Size(640, 480)
+            val size = if (BuildConfig.LITE) android.util.Size(960, 540) else android.util.Size(1280, 720)
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(size)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -115,7 +115,8 @@ class HandTrackingService : LifecycleService() {
                 try {
                     val timestamp = image.imageInfo.timestamp / 1_000_000L
                     // Colour search is cheap, so the camera Joy-Con mode uses every frame it can.
-                    val interval = if (settings.cameraJoyCons || settings.markerJoyCons) 25 else 30
+                    // Hands take every frame the tracker is free for (it is the limit anyway), as in the home.
+                    val interval = if (settings.cameraJoyCons || settings.markerJoyCons) 25 else 0
                     if (timestamp - lastFrameMs >= interval && busy.compareAndSet(false, true)) {
                         lastFrameMs = timestamp
                         val frame = image.toBitmap()
@@ -275,7 +276,8 @@ class HandTrackingService : LifecycleService() {
     }
 
     private fun applySettings() {
-        settings = Settings.load(this)
+        // Joy-Con follow the hands now: no colour or marker search in the camera picture.
+        settings = Settings.load(this).copy(cameraJoyCons = false, markerJoyCons = false)
         stableLeft.configure(settings.trackingSmoothness)
         stableRight.configure(settings.trackingSmoothness)
         JoyConButtons.apply(settings)
@@ -283,22 +285,13 @@ class HandTrackingService : LifecycleService() {
 
     private fun sendLatest() {
         val current = settings
-        var leftJoy = joyCons?.pose(true) ?: JoyConTracker.Pose()
-        var rightJoy = joyCons?.pose(false) ?: JoyConTracker.Pose()
+        // Joy-Con are tracked through the hands holding them: position and rotation come from the
+        // hand, the Joy-Con only adds its buttons and stick. No gyroscope, camera colours or markers.
+        val leftJoy = JoyConTracker.Pose(connected = JoyConButtons.connected(true))
+        val rightJoy = JoyConTracker.Pose(connected = JoyConButtons.connected(false))
         var left = stableLeft.snapshot(leftJoy.connected)
         var right = stableRight.snapshot(rightJoy.connected)
-        if (current.markerJoyCons) {
-            left = markerHand(0, leftJoy.connected)
-            right = markerHand(1, rightJoy.connected)
-            markerPoses[0].let { leftJoy = JoyConTracker.Pose(leftJoy.connected, it.qx, it.qy, it.qz, it.qw) }
-            markerPoses[1].let { rightJoy = JoyConTracker.Pose(rightJoy.connected, it.qx, it.qy, it.qz, it.qw) }
-        } else if (current.cameraJoyCons) {
-            left = cameraHand(0, leftJoy.connected)
-            right = cameraHand(1, rightJoy.connected)
-            // A working Joy-Con gyroscope stays the better source of rotation; otherwise the camera gives it.
-            leftJoy = cameraRotation(0, leftJoy, gyroWorks(true))
-            rightJoy = cameraRotation(1, rightJoy, gyroWorks(false))
-        } else if (current.handMode == Settings.HandMode.HANDS) {
+        if (current.handMode == Settings.HandMode.HANDS) {
             // Plain hand tracking: fingers move the hand, they never press anything.
             left = left.copy(fist = false, index = false, thumb = false)
             right = right.copy(fist = false, index = false, thumb = false)
@@ -307,7 +300,7 @@ class HandTrackingService : LifecycleService() {
         // a real fist grabs (squeeze). With a Joy-Con in hand its buttons do this instead.
         var leftMask = JoyConButtons.mask(true)
         var rightMask = JoyConButtons.mask(false)
-        if (current.handMode == Settings.HandMode.CONTROLLERS && !current.markerJoyCons && !current.cameraJoyCons) {
+        if (current.handMode == Settings.HandMode.CONTROLLERS) {
             if (!leftJoy.connected) {
                 if (left.fist) leftMask = leftMask or JoyConButtons.SQUEEZE
                 left = left.copy(fist = left.pinch)
@@ -320,10 +313,8 @@ class HandTrackingService : LifecycleService() {
         val flags = (if (current.sixDof) 1 else 0) or (if (current.handMode == Settings.HandMode.HANDS) 2 else 0)
         val leftStick = JoyConButtons.stick(left = true)
         val rightStick = JoyConButtons.stick(left = false)
-        val leftRotation = if (leftJoy.connected) floatArrayOf(leftJoy.x, leftJoy.y, leftJoy.z, leftJoy.w)
-            else floatArrayOf(left.qx, left.qy, left.qz, left.qw)
-        val rightRotation = if (rightJoy.connected) floatArrayOf(rightJoy.x, rightJoy.y, rightJoy.z, rightJoy.w)
-            else floatArrayOf(right.qx, right.qy, right.qz, right.qw)
+        val leftRotation = floatArrayOf(left.qx, left.qy, left.qz, left.qw)
+        val rightRotation = floatArrayOf(right.qx, right.qy, right.qz, right.qw)
         val message = String.format(
             Locale.US,
             "PH6 %d %d %d %d %.4f %.4f %.4f %.5f %.5f %.5f %.5f %d %.3f %.3f %.3f %.3f %.3f %.3f %.3f " +

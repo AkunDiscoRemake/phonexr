@@ -69,16 +69,36 @@ class CardboardQrActivity : ComponentActivity() {
                     .addOnSuccessListener { codes ->
                         val raw = codes.firstNotNullOfOrNull { it.rawValue }
                         val mm = raw?.let(CardboardProfile::interLensMm)
-                        if (mm != null) {
-                            setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_IPD_MM, mm))
-                            finish()
-                        } else if (raw != null) status.text = tr("QR найден, но это не профиль Cardboard")
+                        when {
+                            mm != null -> done(mm)
+                            raw != null && (raw.contains("://") || CardboardProfile.isShortLink(raw)) && resolving.compareAndSet(false, true) -> {
+                                // A short link: follow it to the real profile.
+                                status.text = tr("Открываю профиль шлема…")
+                                Thread {
+                                    val found = CardboardProfile.resolve(raw)?.let(CardboardProfile::interLensMm)
+                                        ?: Settings.DEFAULT_IPD_MM.takeIf { CardboardProfile.isShortLink(raw) }
+                                    runOnUiThread {
+                                        resolving.set(false)
+                                        if (found != null) done(found) else status.text = tr("QR найден, но это не профиль Cardboard")
+                                    }
+                                }.start()
+                            }
+                            raw != null && !resolving.get() -> status.text = tr("QR найден, но это не профиль Cardboard")
+                        }
                     }
                     .addOnCompleteListener { busy.set(false); proxy.close() }
             }
             provider.unbindAll()
             provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, cameraPreview, analysis)
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private val resolving = AtomicBoolean(false)
+
+    private fun done(mm: Int) {
+        if (isFinishing) return
+        setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_IPD_MM, mm))
+        finish()
     }
 
     override fun onDestroy() { executor.shutdownNow(); super.onDestroy() }

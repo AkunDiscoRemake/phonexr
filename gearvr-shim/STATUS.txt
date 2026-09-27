@@ -76,3 +76,17 @@ src/vrapi_input.cpp      контроллеры: в режиме Gear VR пра�
 Обходить проверку покупки Oculus Platform (libovrplatformloader.so). Такие игры
 PhoneXR всё равно готовит и ставит, но библиотеку проверки не меняет: если игра без
 покупки не работает, она не запустится; если проверка ни на что не влияет, играть можно.
+
+Драйвер без патча (com.oculus.systemdriver)
+------------------------------------------
+libvrapi.so внутри игры — только загрузчик: vrapi_Initialize открывает пакет
+com.oculus.systemdriver, вызывает DriverLoader.load64 / load64Ext (в 32-битных играх load32 /
+load32Ext) с (Context игры, Context драйвера, 5 int[, long]) и получает адрес функции
+«функция по имени». Ею загрузчик по именам (vrapi_Initialize, vrapi_SubmitFrame2, … — те же, что
+экспорты) заполняет свою таблицу; подпись пакета не проверяется.
+Цель phonexr_vrapi собирает тот же VrApi + src/vrapi_driver.cpp (get_proc и JNI procAddress),
+vrapi-driver/build_driver_apk.py упаковывает его с загрузчиком OpenXR (arm64 и arm) в
+PhoneXR VrApi Driver → app/src/main/assets/runtime/phonexr-vrapi-driver.apk.
+Игры с targetSdk 30+ не видят чужие пакеты: PhoneXR запускает их через GameLauncher рантайма,
+тот — через GameLauncher драйвера, и игра получает URI обоих пакетов, что делает их видимыми.
+Проверено с оригинальным загрузчиком 1.1.50 из SDK: arm64 и armeabi-v7a — vrapi_Initialize = 0.

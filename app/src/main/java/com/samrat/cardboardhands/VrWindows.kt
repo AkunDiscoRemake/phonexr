@@ -3,6 +3,16 @@ package com.samrat.cardboardhands
 import android.annotation.SuppressLint
 import android.app.Presentation
 import android.content.ContentUris
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import android.content.Context
 import android.content.ComponentName
 import android.content.ServiceConnection
@@ -77,12 +87,23 @@ class VrWindow(val id: String, val title: String, val iconId: String, val conten
         fun toolbarAction(action: String) = Unit
         /** Bumped when the bar should be redrawn. */
         val toolbarVersion: Int get() = 0
+        /** The browser's tabs (titles) and which one is shown. */
+        fun toolbarTabs(): List<String> = emptyList()
+        val toolbarTab: Int get() = 0
         fun motion(event: MotionEvent) = Unit
         /** True while a text field in the content wants the VR keyboard. */
         val keyboardRequested: Boolean get() = false
         /** A key from the VR keyboard: text, or "backspace" / "enter". */
         fun type(key: String) = Unit
         fun hideKeyboard() = Unit
+        /** True while the content fills the whole headset view (an immersive WebXR session). */
+        val immersive: Boolean get() = false
+        /** An immersive-ar page: drawn over the camera picture instead of filling the view alone. */
+        val immersiveAr: Boolean get() = false
+        /** PhoneXR's tracked hands, as JSON, for an immersive page that uses them. */
+        fun hands(json: String) = Unit
+        /** Leaves the immersive view (the palm held to the face). */
+        fun exitImmersive() = Unit
         fun release()
     }
 
@@ -103,29 +124,191 @@ private class TouchEvents(private val width: Int, private val height: Int, priva
     }
 }
 
-/** The PhoneXR browser: a WebView on the app's own virtual display, drawn into the window. */
-class BrowserContent(private val startUrl: String, private val onWebXr: (String) -> Unit = {}) : VrWindow.Content {
+/**
+ * The PhoneXR browser: a WebView on the app's own virtual display, drawn into the window. It has
+ * WebXR: the WebXR polyfill runs in every page before the page's scripts, and an immersive
+ * session turns the window into the whole headset view — the display grows to the phone screen,
+ * the polyfill draws both eyes for Cardboard lenses and follows the head with the phone's sensors.
+ */
+class BrowserContent(
+    private val startUrl: String,
+    private val onWebXr: (String) -> Unit = {},
+    /**
+     * Set for the avatar browser (Avaturn, VRoid Hub): a downloaded .glb / .vrm is handed here as
+     * the user's avatar instead of going to the phone's Downloads.
+     */
+    private val onModel: ((ByteArray, String) -> Unit)? = null,
+) : VrWindow.Content {
+    /** A site shown as an app (Instagram, Discord): no address bar or tabs, only the window's pill. */
+    var appMode: Boolean = false
     override val pixelWidth = 1600
     override val pixelHeight = 1000
     override val external = true
     private val main = Handler(Looper.getMainLooper())
+
+    /** Set by a window watched together: run on every page; [onVideo] hears the page's video play/pause/seek. */
+    var togetherScript: String? = null
+    var onVideo: ((String) -> Unit)? = null
+
+    /** Runs [script] in the page shown now. */
+    fun runScript(script: String) {
+        main.post { webView?.evaluateJavascript(script, null) }
+    }
     private var display: VirtualDisplay? = null
     private var presentation: Presentation? = null
-    private var webView: WebView? = null
+    /** A tab: its own WebView, where it is and what it is called. Changed on the main thread only. */
+    private class Tab(var view: WebView, @Volatile var url: String, @Volatile var title: String = "")
+
+    private val tabs = java.util.concurrent.CopyOnWriteArrayList<Tab>()
+    @Volatile private var active = 0
+    /** The page on screen: the chosen tab's WebView. */
+    private val webView: WebView? get() = tabs.getOrNull(active)?.view
+    private var texture: SurfaceTexture? = null
+    private var screen = Size(2400, 1080)
     private val touches = TouchEvents(pixelWidth, pixelHeight, InputDevice.SOURCE_TOUCHSCREEN)
-    @Volatile private var currentUrl = startUrl
+    private var immersiveTouches = TouchEvents(screen.width, screen.height, InputDevice.SOURCE_TOUCHSCREEN)
+    @Volatile private var xr = false
+    @Volatile private var ar = false
+    private var viewContext: Context? = null
+
+    override val immersive get() = xr
+    override val immersiveAr get() = xr && ar
+
+    override fun exitImmersive() {
+        main.post {
+            webView?.evaluateJavascript("window.__pxrSession && window.__pxrSession.end()", null)
+        }
+    }
+
+    /**
+     * The session starts or ended: the virtual display takes the standard WebXR size ([xrSize]), or
+     * goes back to the window. The page asks for this before its session exists ([Bridge.prepareXr]),
+     * so the game lays itself out once, at the right size.
+     */
+    private fun setImmersive(on: Boolean, augmented: Boolean = false) = main.post {
+        ar = on && augmented
+        // An AR page lets the camera show through where it draws nothing.
+        webView?.setBackgroundColor(if (ar) android.graphics.Color.TRANSPARENT else android.graphics.Color.WHITE)
+        if (on == xr) return@post
+        val size = if (on) xrSize() else Size(pixelWidth, pixelHeight)
+        texture?.setDefaultBufferSize(size.width, size.height)
+        display?.resize(size.width, size.height, if (on) XR_DPI else 280)
+        xr = on
+    }
+
+    /**
+     * The standard WebXR view: always [XR_HEIGHT] pixels high and the phone screen's shape wide, at
+     * the same density every time — so a game gets the same canvas on every start instead of
+     * whatever the window happened to be, and nothing of it falls off the edges.
+     */
+    private fun xrSize(): Size {
+        val aspect = (screen.width.toFloat() / screen.height).coerceIn(1.6f, 2.4f)
+        return Size((XR_HEIGHT * aspect).toInt() / 2 * 2, XR_HEIGHT)
+    }
+    private val currentUrl: String get() = tabs.getOrNull(active)?.url ?: startUrl
+    private val currentTitle: String get() = tabs.getOrNull(active)?.title.orEmpty()
+
+    private fun tabOf(view: WebView) = tabs.firstOrNull { it.view === view }
+
+    /** A new tab with [url], shown at once. */
+    private fun addTab(url: String) {
+        val context = viewContext ?: return
+        val view = buildWebView(context, url)
+        tabs += Tab(view, url)
+        showTab(tabs.size - 1)
+    }
+
+    private fun showTab(index: Int) {
+        if (index !in tabs.indices) return
+        setImmersive(false)
+        active = index
+        presentation?.setContentView(tabs[index].view)
+        keyboard = false
+        version++
+    }
+
+    /** Closes a tab; the last one is not closed but goes to the start page. */
+    private fun closeTab(index: Int) {
+        val tab = tabs.getOrNull(index) ?: return
+        if (tabs.size == 1) { tab.view.loadUrl(HOME); return }
+        tabs.removeAt(index)
+        tab.view.destroy()
+        showTab(if (active >= tabs.size) tabs.size - 1 else if (index < active) active - 1 else active)
+    }
+
+    override fun toolbarTabs(): List<String> = tabs.map { tab ->
+        tab.title.ifEmpty { if (tab.url.startsWith("file:")) "Новая вкладка" else Uri.parse(tab.url).host?.removePrefix("www.") ?: tab.url }
+    }
+
+    override val toolbarTab: Int get() = active
     @Volatile private var version = 0
     @Volatile private var keyboard = false
+    /** The address bar while it is being typed into (the VR keyboard is up); null otherwise. */
+    @Volatile private var editing: String? = null
 
-    override val keyboardRequested get() = keyboard
+    override val keyboardRequested get() = keyboard || editing != null
+
+    /** Only PhoneXR's own start page may use the browser's private calls (history, bookmarks). */
+    private fun ownPage() = currentUrl.startsWith("file:///android_asset/")
 
     /** Called from the page script: text fields and WebXR sessions. */
     private inner class Bridge {
         @JavascriptInterface fun keyboard(show: Boolean) { keyboard = show }
+        @JavascriptInterface fun video(state: String) { onVideo?.invoke(state) }
         @JavascriptInterface fun enterXr(url: String) { onWebXr(url) }
+        @JavascriptInterface fun immersive(on: Boolean, augmented: Boolean) { setImmersive(on, augmented) }
+        /** Before an immersive session: the page goes to the standard size and gets it as "WxH". */
+        @JavascriptInterface fun prepareXr(augmented: Boolean): String {
+            setImmersive(true, augmented)
+            return xrSize().let { "${it.width}x${it.height}" }
+        }
+        /** A model the page made in memory (a blob: download), as a data: URL. */
+        @JavascriptInterface fun model(data: String, name: String) {
+            val sink = onModel ?: return
+            val bytes = runCatching { android.util.Base64.decode(data.substringAfter(","), android.util.Base64.DEFAULT) }.getOrNull() ?: return
+            sink(bytes, name)
+        }
+        @JavascriptInterface fun newTab(url: String) { if (ownPage()) main.post { addTab(BrowserData.addressFor(url)) } }
+
+        // The start page's own calls.
+        @JavascriptInterface fun homeData(): String = viewContext?.takeIf { ownPage() }?.let { BrowserData.homeJson(it) } ?: "{}"
+        @JavascriptInterface fun setDesktop(on: Boolean) { viewContext?.takeIf { ownPage() }?.let { BrowserData.setDesktop(it, on); main.post { applySettings() } } }
+        @JavascriptInterface fun setAdblock(on: Boolean) { viewContext?.takeIf { ownPage() }?.let { BrowserData.setAdblock(it, on) } }
+        @JavascriptInterface fun clearHistory() { viewContext?.takeIf { ownPage() }?.let { BrowserData.clearHistory(it) } }
+        @JavascriptInterface fun removeBookmark(url: String) { viewContext?.takeIf { ownPage() }?.let { BrowserData.removeBookmark(it, url) } }
+        @JavascriptInterface fun editAddress() { if (ownPage()) startEditing() }
+    }
+
+    /** Desktop sites: a computer's browser name and a wide page; otherwise the phone's own. */
+    private fun applySettings() {
+        val view = webView ?: return
+        val context = viewContext ?: return
+        val desktop = BrowserData.desktop(context)
+        view.settings.userAgentString = if (desktop) BrowserData.DESKTOP_AGENT else null
+        view.settings.useWideViewPort = true
+        view.settings.loadWithOverviewMode = desktop
+    }
+
+    private fun startEditing() {
+        editing = ""
+        version++
     }
 
     override fun type(key: String) {
+        val typed = editing
+        if (typed != null) {
+            when (key) {
+                "backspace" -> editing = typed.dropLast(1)
+                "enter" -> {
+                    editing = null
+                    val url = BrowserData.addressFor(typed)
+                    main.post { webView?.loadUrl(url) }
+                }
+                else -> if (typed.length < 400) editing = typed + key
+            }
+            version++
+            return
+        }
         val script = when (key) {
             "backspace" -> "window.__pxrType && __pxrType('', 1)"
             "enter" -> "window.__pxrType && __pxrType('\\n', 0)"
@@ -135,15 +318,21 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
     }
 
     override fun hideKeyboard() {
+        if (editing != null) { editing = null; version++; return }
         keyboard = false
         main.post { webView?.evaluateJavascript("document.activeElement && document.activeElement.blur()", null) }
     }
 
     override val toolbarVersion get() = version
 
-    override fun toolbarTitle(): String = when {
-        currentUrl.startsWith("file:") -> "Поиск или адрес"
-        else -> Uri.parse(currentUrl).host?.removePrefix("www.") ?: currentUrl
+    override fun toolbarTitle(): String? {
+        if (appMode) return null
+        editing?.let { return it + "|" }
+        val star = if (viewContext?.let { BrowserData.isBookmarked(it, currentUrl) } == true) "★ " else ""
+        return star + when {
+            currentUrl.startsWith("file:") -> "Поиск или адрес"
+            else -> Uri.parse(currentUrl).host?.removePrefix("www.") ?: currentUrl
+        }
     }
 
     override fun toolbarAction(action: String) {
@@ -154,6 +343,21 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
                 "forward" -> if (view.canGoForward()) view.goForward()
                 "reload" -> view.reload()
                 "home" -> view.loadUrl(HOME)
+                "newtab" -> addTab(HOME)
+                else -> when {
+                    action.startsWith("tab:") -> action.removePrefix("tab:").toIntOrNull()?.let { showTab(it) }
+                    action.startsWith("closetab:") -> action.removePrefix("closetab:").toIntOrNull()?.let { closeTab(it) }
+                }
+            }
+            when (action) {
+                // The address field: type a site or a search with the VR keyboard.
+                "address" -> startEditing()
+                "bookmark" -> viewContext?.let { context ->
+                    if (currentUrl.startsWith("http")) {
+                        BrowserData.toggleBookmark(context, currentUrl, currentTitle)
+                        version++
+                    }
+                }
             }
         }
     }
@@ -161,6 +365,13 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
     @SuppressLint("SetJavaScriptEnabled")
     override fun attach(context: Context, texture: SurfaceTexture?, onReady: () -> Unit) {
         texture?.setDefaultBufferSize(pixelWidth, pixelHeight)
+        this.texture = texture
+        // The whole panel, not the part left by system bars, so the shape is the same every time.
+        @Suppress("DEPRECATION")
+        val metrics = android.util.DisplayMetrics().also { context.getSystemService(android.view.WindowManager::class.java).defaultDisplay.getRealMetrics(it) }
+        screen = Size(maxOf(metrics.widthPixels, metrics.heightPixels), minOf(metrics.widthPixels, metrics.heightPixels))
+        immersiveTouches = xrSize().let { TouchEvents(it.width, it.height, InputDevice.SOURCE_TOUCHSCREEN) }
+        viewContext = context
         val surface = Surface(texture)
         main.post {
             val manager = context.getSystemService(DisplayManager::class.java)
@@ -168,31 +379,12 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
             // 280 dpi reads like a tablet at arm's length in VR.
             val created = manager.createVirtualDisplay("PhoneXR Browser", pixelWidth, pixelHeight, 280, surface, 0)
             display = created
-            val view = WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mediaPlaybackRequiresUserGesture = false
-                webViewClient = object : WebViewClient() {
-                    override fun doUpdateVisitedHistory(view: WebView, address: String, isReload: Boolean) {
-                        currentUrl = address
-                        version++
-                    }
-
-                    override fun onPageStarted(view: WebView, address: String?, favicon: Bitmap?) {
-                        keyboard = false
-                        view.evaluateJavascript(PAGE_SCRIPT, null)
-                    }
-
-                    override fun onPageCommitVisible(view: WebView, address: String?) = view.evaluateJavascript(PAGE_SCRIPT, null)
-
-                    override fun onPageFinished(view: WebView, address: String?) = view.evaluateJavascript(PAGE_SCRIPT, null)
-                }
-                webChromeClient = WebChromeClient()
-                addJavascriptInterface(Bridge(), "PhoneXR")
-                loadUrl(startUrl)
-            }
-            webView = view
+            val view = buildWebView(context, startUrl)
+            tabs += Tab(view, startUrl)
+            active = 0
             presentation = Presentation(context, created.display).apply {
+                // Translucent, so an immersive-ar page can show the camera where it draws nothing.
+                window?.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
                 setContentView(view)
                 show()
             }
@@ -200,9 +392,145 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
         }
     }
 
+    /** A WebView with PhoneXR's page scripts and WebXR; built again if its renderer ever dies. */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun buildWebView(context: Context, url: String): WebView {
+        // Debug builds: pages can be inspected from chrome://inspect on the computer.
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
+        return WebView(context).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.mediaPlaybackRequiresUserGesture = false
+                webViewClient = object : WebViewClient() {
+                    override fun doUpdateVisitedHistory(view: WebView, address: String, isReload: Boolean) {
+                        tabOf(view)?.url = address
+                        version++
+                    }
+
+                    // The ad blocker: known ad and tracker hosts get an empty answer.
+                    override fun shouldInterceptRequest(view: WebView, request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
+                        // Pages bundled in the APK are served over https, so ES modules load.
+                        if (request.url.host == ASSET_HOST) return assets.shouldInterceptRequest(request.url)
+                        val context = viewContext ?: return null
+                        if (!BrowserData.adblock(context) || !BrowserData.blocked(request.url.host)) return null
+                        return android.webkit.WebResourceResponse("text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
+                    }
+
+                    override fun onPageStarted(view: WebView, address: String?, favicon: Bitmap?) {
+                        keyboard = false
+                        setImmersive(false)
+                        // Old WebView without document-start scripts: as early as it can be.
+                        if (!webXrAtStart) view.evaluateJavascript(webXrScript(view.context), null)
+                        view.evaluateJavascript(PAGE_SCRIPT, null)
+                    }
+
+                    override fun onPageCommitVisible(view: WebView, address: String?) = view.evaluateJavascript(PAGE_SCRIPT, null)
+
+                    override fun onPageFinished(view: WebView, address: String?) {
+                        view.evaluateJavascript(PAGE_SCRIPT, null)
+                        togetherScript?.let { view.evaluateJavascript(it, null) }
+                        val title = view.title.orEmpty()
+                        tabOf(view)?.title = title
+                        version++
+                        if (address != null) viewContext?.let { BrowserData.visit(it, address, title) }
+                    }
+
+                    // A heavy WebXR game can take the page's renderer down. Without this Android
+                    // would close all of PhoneXR; instead the page comes back in a new WebView.
+                    override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                        android.util.Log.w("PhoneXR-WebXR", "page renderer gone, crash=${detail.didCrash()}")
+                        setImmersive(false)
+                        main.post {
+                            val tab = tabOf(view)
+                            val fresh = buildWebView(view.context, tab?.url ?: currentUrl)
+                            tab?.view = fresh
+                            if (tab == tabs.getOrNull(active)) presentation?.setContentView(fresh)
+                            view.destroy()
+                        }
+                        return true
+                    }
+                }
+                webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(message: android.webkit.ConsoleMessage): Boolean {
+                        if (message.message().startsWith("PhoneXR")) android.util.Log.i("PhoneXR-WebXR", message.message())
+                        return false
+                    }
+                }
+                addJavascriptInterface(Bridge(), "PhoneXR")
+                // Downloads go to Downloads/PhoneXR with the system's download manager.
+                setDownloadListener { url, agent, disposition, mime, _ ->
+                    val name = android.webkit.URLUtil.guessFileName(url, disposition, mime)
+                    if (onModel != null && isModel(url, name, mime)) {
+                        takeModel(this, url, name, agent)
+                        return@setDownloadListener
+                    }
+                    runCatching {
+                        val name = android.webkit.URLUtil.guessFileName(url, disposition, mime)
+                        val request = android.app.DownloadManager.Request(Uri.parse(url))
+                            .setMimeType(mime)
+                            .addRequestHeader("User-Agent", agent)
+                            .addRequestHeader("Cookie", android.webkit.CookieManager.getInstance().getCookie(url) ?: "")
+                            .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                            .setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, "PhoneXR/$name")
+                        context.getSystemService(android.app.DownloadManager::class.java).enqueue(request)
+                        android.widget.Toast.makeText(context, "Загрузка: $name", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+                settings.userAgentString = if (BrowserData.desktop(context)) BrowserData.DESKTOP_AGENT else null
+                settings.useWideViewPort = true
+                settings.loadWithOverviewMode = BrowserData.desktop(context)
+                settings.setSupportMultipleWindows(false)
+                if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                    androidx.webkit.WebViewCompat.addDocumentStartJavaScript(this, webXrScript(context), setOf("*"))
+                    webXrAtStart = true
+                }
+                loadUrl(url)
+            }
+    }
+
+    private fun isModel(url: String, name: String, mime: String?) =
+        url.startsWith("blob:") || name.endsWith(".glb", true) || name.endsWith(".vrm", true) ||
+            mime == "model/gltf-binary" || mime == "application/octet-stream" && url.contains(".glb", true)
+
+    /** Fetches a model download (with the page's cookies) and hands it to [onModel]. */
+    private fun takeModel(view: WebView, url: String, name: String, agent: String) {
+        val sink = onModel ?: return
+        if (url.startsWith("blob:")) {
+            // Only the page can read its own blob: turn it into a data: URL and pass it over.
+            view.evaluateJavascript(
+                "(async()=>{const b=await (await fetch(${org.json.JSONObject.quote(url)})).blob();" +
+                    "const r=new FileReader();r.onload=()=>PhoneXR.model(r.result, ${org.json.JSONObject.quote(name)});r.readAsDataURL(b);})()",
+                null,
+            )
+            return
+        }
+        thread(name = "PhoneXR avatar download") {
+            runCatching {
+                val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                connection.setRequestProperty("User-Agent", agent)
+                android.webkit.CookieManager.getInstance().getCookie(url)?.let { connection.setRequestProperty("Cookie", it) }
+                connection.inputStream.use { it.readBytes() }
+            }.getOrNull()?.let { sink(it, name) }
+        }
+    }
+
+    private var webXrAtStart = false
+    private val assets by lazy {
+        androidx.webkit.WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", androidx.webkit.WebViewAssetLoader.AssetsPathHandler(viewContext!!))
+            .build()
+    }
+
+    /** PhoneXR's own hands for the page (21 points each in head space, metres), while immersive. */
+    override fun hands(json: String) {
+        if (!xr) return
+        main.post { webView?.evaluateJavascript("window.__pxrHandsIn && __pxrHandsIn($json)", null) }
+    }
+
     override fun touch(action: Int, u: Float, v: Float) {
         main.post {
-            val event = touches.event(action, u, v)
+            // In the immersive view a touch is WebXR "select", given where the polyfill listens: the screen.
+            val event = if (xr) immersiveTouches.event(action, u, v) else touches.event(action, u, v)
             presentation?.window?.decorView?.dispatchTouchEvent(event)
             event.recycle()
         }
@@ -222,7 +550,7 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
     override fun release() {
         main.post {
             presentation?.dismiss()
-            webView?.destroy()
+            tabs.forEach { it.view.destroy() }
             display?.release()
         }
     }
@@ -230,11 +558,155 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
     companion object {
         /** Start page with shortcuts, so browsing works without a keyboard. */
         const val HOME = "file:///android_asset/browser/home.html"
+        const val ASSET_HOST = "appassets.androidplatform.net"
+
+        private var polyfill: String? = null
+        /** The standard immersive WebXR view: this many pixels high, at this density. */
+        private const val XR_HEIGHT = 900
+        private const val XR_DPI = 300
 
         /**
-         * Runs in every page: reports focused text fields so the VR keyboard shows, types into them,
-         * and offers WebXR. The WebView has no WebXR of its own, so an immersive session opens the page
-         * in the PhoneXR browser (Wolvic engine, OpenXR).
+         * WebXR for the WebView: Google's WebXR polyfill in Cardboard mode (its own buttons and
+         * "rotate the phone" screen off, since the phone already sits in the headset), and a
+         * watch on immersive sessions so PhoneXR can open the full view and close it again.
+         */
+        /** The phone's whole screen in metres, as the polyfill's device: the page fills it. */
+        private fun device(context: Context): String {
+            @Suppress("DEPRECATION")
+            val metrics = android.util.DisplayMetrics().also {
+                context.getSystemService(android.view.WindowManager::class.java).defaultDisplay.getRealMetrics(it)
+            }
+            val landscape = metrics.widthPixels >= metrics.heightPixels
+            val long = maxOf(metrics.widthPixels, metrics.heightPixels)
+            val short = minOf(metrics.widthPixels, metrics.heightPixels)
+            val longDpi = (if (landscape) metrics.xdpi else metrics.ydpi).takeIf { it > 1f } ?: 400f
+            val shortDpi = (if (landscape) metrics.ydpi else metrics.xdpi).takeIf { it > 1f } ?: 400f
+            return "{ widthMeters: ${long / longDpi * .0254f}, heightMeters: ${short / shortDpi * .0254f}, bevelMeters: 0.003 }"
+        }
+
+        /**
+         * The field of view PhoneXR itself draws each eye with: 90° high, as wide as half the screen
+         * allows at that height (VR home's projection).
+         */
+        private fun fov(context: Context): String {
+            @Suppress("DEPRECATION")
+            val metrics = android.util.DisplayMetrics().also {
+                context.getSystemService(android.view.WindowManager::class.java).defaultDisplay.getRealMetrics(it)
+            }
+            val aspect = maxOf(metrics.widthPixels, metrics.heightPixels) / 2f / minOf(metrics.widthPixels, metrics.heightPixels)
+            val side = Math.toDegrees(kotlin.math.atan(aspect.toDouble())).toFloat()
+            return "{ upDegrees: 45, downDegrees: 45, leftDegrees: $side, rightDegrees: $side }"
+        }
+
+        /** The headset chosen in PhoneXR, with the user's lens correction, as a Cardboard viewer. */
+        private fun viewer(context: Context): String {
+            val headset = Headsets.current(context)
+            val lenses = Settings.ipdMm(context) / 1000f
+            return "{ id: 'PhoneXR', label: 'PhoneXR', fov: ${headset.fovDeg}, interLensDistance: $lenses, " +
+                "baselineLensDistance: ${headset.trayToLensMm / 1000f}, screenLensDistance: ${headset.screenToLensMm / 1000f}, " +
+                "distortionCoefficients: [0.34, 0.55], inverseCoefficients: [-0.33836704, -0.18162185, 0.862655, -1.2462051, 1.0560602, " +
+                "-0.58208317, 0.21609078, -0.05444823, 0.009177956, -0.0009904169, 6.183535e-5, -1.6981803e-6] }"
+        }
+
+        fun webXrScript(context: Context): String {
+            // The polyfill guesses the phone's screen from a list of phones; PhoneXR knows it.
+            val source = polyfill ?: context.assets.open("browser/webxr-polyfill.js").bufferedReader().use { it.readText() }
+                .replace("determineDevice_=function(e){if(!e)", "determineDevice_=function(e){if(window.__pxrDevice)return new H(window.__pxrDevice);if(!e)")
+                // PhoneXR's field of view for every eye, and no lens warp of the polyfill's own: the
+                // plain side-by-side picture goes through PhoneXR's lens pass like everything else.
+                .replace("_getFieldOfView=function(e){var t;", "_getFieldOfView=function(e){if(window.__pxrFov)return window.__pxrFov;var t;")
+                .replace("d=2*(o.x+d*o.width-.5),u=2*(o.y+u*o.height-.5)",
+                    "d=window.__pxrFov?2*(A*.5+p*.5-.5):2*(o.x+d*o.width-.5),u=window.__pxrFov?2*(f-.5):2*(o.y+u*o.height-.5)")
+                .also { polyfill = it }
+            return """
+                (function() {
+                  if (window.__pxrXr) return;
+                  window.__pxrXr = true;
+                  // The headset and screen set in PhoneXR, not the polyfill's guesses.
+                  window.__pxrDevice = ${device(context)};
+                  window.__pxrFov = ${fov(context)};
+                  try { localStorage.setItem('WEBVR_CARDBOARD_VIEWER', 'PhoneXR'); } catch (e) {}
+                  // Hands from PhoneXR's tracking, for pages that want them: an event and a global.
+                  window.__pxrHandsIn = function(data) {
+                    data.at = performance.now();
+                    window.PhoneXRHands = data;
+                    window.dispatchEvent(new CustomEvent('phonexrhands', { detail: data }));
+                  };
+                  // Android WebView may carry a navigator.xr that can do nothing: take it away first,
+                  // or the polyfill would think WebXR is already there and stay out.
+                  try { delete Navigator.prototype.xr; } catch (e) {}
+                  try { if ('xr' in navigator) Object.defineProperty(navigator, 'xr', { value: undefined, configurable: true, writable: true }); } catch (e) {}
+                  var savedDefine = window.define; window.define = undefined;
+                  // No browser fullscreen for the VR canvas (it would detach the page in a WebView):
+                  // the polyfill then fills the page itself, and PhoneXR makes the page the whole view.
+                  ['requestFullscreen', 'webkitRequestFullscreen', 'webkitRequestFullScreen', 'mozRequestFullScreen', 'msRequestFullscreen']
+                    .forEach(function(name) { try { Element.prototype[name] = undefined; } catch (e) {} });
+                  if (!navigator.xr) {
+                    $source
+                    try {
+                      new WebXRPolyfill({ cardboard: true, allowCardboardOnDesktop: true,
+                        cardboardConfig: { CARDBOARD_UI_DISABLED: true, ROTATE_INSTRUCTIONS_DISABLED: true, BUFFER_SCALE: 0.75,
+                          DPDB_URL: false, ADDITIONAL_VIEWERS: [${viewer(context)}], DEFAULT_VIEWER: 'PhoneXR' } });
+                    } catch (e) { console.log('PhoneXR WebXR: ' + e); }
+                  }
+                  window.define = savedDefine;
+                  if (!navigator.xr || !navigator.xr.requestSession) return;
+                  // AR: PhoneXR has the camera, so immersive-ar is offered too. It runs as a VR
+                  // session whose empty pixels show the camera ("alpha-blend"), without hit tests.
+                  var supported = navigator.xr.isSessionSupported.bind(navigator.xr);
+                  navigator.xr.isSessionSupported = function(mode) {
+                    if (mode === 'immersive-ar') return supported('immersive-vr');
+                    return supported(mode);
+                  };
+                  var request = navigator.xr.requestSession.bind(navigator.xr);
+                  // Standard size first: PhoneXR resizes the page, and the session starts once the
+                  // page really is that size, so the game lays out its canvas once and fully.
+                  function prepare(augmented) {
+                    var size = String(PhoneXR.prepareXr(augmented)).split('x');
+                    var want = Number(size[0]);
+                    var started = performance.now();
+                    return new Promise(function(resolve) {
+                      (function wait() {
+                        var now = Math.round(window.innerWidth * (window.devicePixelRatio || 1));
+                        if (Math.abs(now - want) <= 8 || performance.now() - started > 1500) resolve();
+                        else setTimeout(wait, 30);
+                      })();
+                    });
+                  }
+                  navigator.xr.requestSession = function(mode, options) {
+                    var augmented = mode === 'immersive-ar';
+                    var immersive = String(mode).indexOf('immersive') === 0 && window.PhoneXR;
+                    var asked = options;
+                    if (augmented) {
+                      var keep = function(list) { return (list || []).filter(function(f) { return f === 'local' || f === 'local-floor' || f === 'viewer'; }); };
+                      asked = Object.assign({}, options || {}, { requiredFeatures: keep(options && options.requiredFeatures), optionalFeatures: keep(options && options.optionalFeatures) });
+                    }
+                    var ready = immersive ? prepare(augmented) : Promise.resolve();
+                    return ready.then(function() { return request(augmented ? 'immersive-vr' : mode, asked); }).then(function(session) {
+                      if (augmented) {
+                        try { Object.defineProperty(session, 'environmentBlendMode', { value: 'alpha-blend' }); } catch (e) {}
+                        document.documentElement.style.background = 'transparent';
+                        if (document.body) document.body.style.background = 'transparent';
+                      }
+                      if (immersive) {
+                        window.__pxrSession = session;
+                        PhoneXR.immersive(true, augmented);
+                        session.addEventListener('end', function() { window.__pxrSession = null; PhoneXR.immersive(false, false); });
+                        // Anything sized before the session (the polyfill's canvas) catches up now.
+                        window.dispatchEvent(new Event('resize'));
+                      }
+                      return session;
+                    }, function(error) {
+                      if (immersive) PhoneXR.immersive(false, false);
+                      throw error;
+                    });
+                  };
+                })();
+            """.trimIndent()
+        }
+
+        /**
+         * Runs in every page: reports focused text fields so the VR keyboard shows, and types into them.
          */
         private val PAGE_SCRIPT = """
             (function() {
@@ -278,18 +750,6 @@ class BrowserContent(private val startUrl: String, private val onWebXr: (String)
                 try { e.setSelectionRange(start + text.length, start + text.length); } catch (x) {}
                 e.dispatchEvent(new InputEvent('input', {bubbles: true, data: text, inputType: back ? 'deleteContentBackward' : 'insertText'}));
               };
-              if (!navigator.xr) {
-                var xr = {
-                  isSessionSupported: function(mode) { return Promise.resolve(mode == 'immersive-vr' || mode == 'immersive-ar' || mode == 'inline'); },
-                  requestSession: function(mode) {
-                    PhoneXR.enterXr(location.href);
-                    return Promise.reject(new DOMException('Opening in the PhoneXR immersive browser', 'NotSupportedError'));
-                  },
-                  addEventListener: function() {}, removeEventListener: function() {}, ondevicechange: null
-                };
-                try { Object.defineProperty(navigator, 'xr', {value: xr, configurable: true}); } catch (x) {}
-                window.dispatchEvent(new Event('vrdisplayactivate'));
-              }
             })();
         """.trimIndent()
     }
@@ -448,10 +908,7 @@ class PhotosContent(
     private val onVideo: (Uri, String, Int, Int) -> Unit = { _, _, _, _ -> },
     /** A 360° or 180° memory does not fit a window: it goes around the viewer instead. */
     private val onPanorama: (Uri, String, Int, Int, Boolean) -> Unit = { _, _, _, _, _ -> },
-) : VrWindow.Content {
-    override val pixelWidth = 1600
-    override val pixelHeight = 1000
-    override val external = false
+) : ComposeContent() {
     private data class Photo(
         val uri: Uri,
         val name: String,
@@ -464,39 +921,24 @@ class PhotosContent(
         val stereo get() = layout != Spatial.Layout.MONO
     }
 
-    private val bitmap = Bitmap.createBitmap(pixelWidth, pixelHeight, Bitmap.Config.ARGB_8888)
-    private val canvas = Canvas(bitmap)
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    @Volatile private var fresh = true
-    @Volatile private var photos = emptyList<Photo>()
-    private val thumbs = HashMap<Uri, Bitmap>()
-    @Volatile private var open: Photo? = null
-    private var page = 0
+    private var photos by androidx.compose.runtime.mutableStateOf(emptyList<Photo>())
+    private var open by androidx.compose.runtime.mutableStateOf<Photo?>(null)
     /** What the window says while a flat photo is being turned into a 3D one. */
-    @Volatile private var status: String? = null
-    @Volatile private var busy = false
+    private var status by androidx.compose.runtime.mutableStateOf<String?>(null)
+    private var busy by androidx.compose.runtime.mutableStateOf(false)
 
-    override fun attach(context: Context, texture: SurfaceTexture?, onReady: () -> Unit) {
-        thread(name = "PhoneXR photos") {
-            photos = query()
-            draw()
-            onReady()
-        }
+    init {
+        thread(name = "PhoneXR photos") { photos = query() }
     }
 
-    override fun takeBitmap(): Bitmap? = if (fresh) bitmap.also { fresh = false } else null
-
-    override fun toolbarTitle(): String = open?.name?.takeIf { it.isNotEmpty() } ?: "Фото · ${photos.size}"
-    override val toolbarVersion get() = (open?.hashCode() ?: 0) + photos.size
 
     override fun toolbarAction(action: String) {
         thread {
             when (action) {
                 "back" -> open = null
                 "forward" -> open?.let { current -> photos.getOrNull(photos.indexOf(current) + 1)?.let { open = it } }
-                "reload", "home" -> { open = null; page = 0; photos = query() }
+                "reload", "home" -> { open = null; photos = query() }
             }
-            draw()
         }
     }
 
@@ -504,39 +946,98 @@ class PhotosContent(
     fun reload() = toolbarAction("reload")
 
     override fun uv(eye: Int): FloatArray {
-        val photo = open ?: return floatArrayOf(0f, 0f, 1f, 1f)
-        // The picture fills the window, so each eye's half of the window is that eye's half of it.
+        val photo = open?.takeIf { it.stereo } ?: return floatArrayOf(0f, 0f, 1f, 1f)
+        // A 3D photo fills the window, so each eye's half of the window is that eye's half of it.
         return Spatial.uv(photo.layout, eye)
     }
 
-    override fun touch(action: Int, u: Float, v: Float) {
-        if (action != MotionEvent.ACTION_UP) return
-        thread {
-            val current = open
-            if (current != null) {
-                // The button under a flat photo turns it into a 3D one; anywhere else closes it.
-                if (v > .88f && u < .3f && !current.stereo && !current.video) makeStereo(current)
-                else open = null
-            } else {
-                val column = (u * COLUMNS).toInt().coerceIn(0, COLUMNS - 1)
-                when {
-                    v > .92f && u < .2f -> page = (page - 1).coerceAtLeast(0)
-                    v > .92f && u > .8f -> page = (page + 1).coerceAtMost((photos.size - 1) / PER_PAGE)
-                    v <= .92f -> {
-                        val row = (v / .92f * ROWS).toInt().coerceIn(0, ROWS - 1)
-                        val picked = photos.getOrNull(page * PER_PAGE + row * COLUMNS + column)
-                        when {
-                            picked == null -> open = null
-                            picked.shape != Spatial.Shape.FLAT ->
-                                onPanorama(picked.uri, picked.name, picked.width, picked.height, picked.video)
-                            // A video plays in a window of its own, with a timeline under it.
-                            picked.video -> onVideo(picked.uri, picked.name, picked.width, picked.height)
-                            else -> open = picked
+    private fun pick(item: Photo) {
+        when {
+            item.shape != Spatial.Shape.FLAT -> onPanorama(item.uri, item.name, item.width, item.height, item.video)
+            // A video plays in a window of its own, with a timeline under it.
+            item.video -> onVideo(item.uri, item.name, item.width, item.height)
+            else -> { status = null; open = item }
+        }
+    }
+
+    @androidx.compose.runtime.Composable
+    override fun Content() {
+        val photo = open
+        if (photo != null) Viewer(photo) else Grid()
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun Grid() {
+        androidx.compose.foundation.layout.Column(
+            androidx.compose.ui.Modifier.fillMaxSize().background(zone.ien.hig.theme.CupertinoTheme.colorScheme.systemBackground)
+        ) {
+            VrTitle(tr("Фото"), if (photos.isEmpty()) "Нет фото или нет доступа к галерее" else "${photos.size} · новые сверху")
+            androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+                columns = androidx.compose.foundation.lazy.grid.GridCells.Fixed(5),
+                modifier = androidx.compose.ui.Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
+            ) {
+                items(photos.size, key = { photos[it].uri.toString() }) { index ->
+                    val item = photos[index]
+                    androidx.compose.foundation.layout.Box(
+                        androidx.compose.ui.Modifier.aspectRatio(1f).clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+                            .background(androidx.compose.ui.graphics.Color(0xFF2C2C2E)).clickable { pick(item) }
+                    ) {
+                        val thumb = androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, item.uri) {
+                            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                runCatching { context.contentResolver.loadThumbnail(item.uri, Size(320, 320), null).asImageBitmap() }.getOrNull()
+                            }
+                        }.value
+                        if (thumb != null) androidx.compose.foundation.Image(thumb, null, contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = androidx.compose.ui.Modifier.fillMaxSize())
+                        val badge = when {
+                            item.shape != Spatial.Shape.FLAT && item.stereo -> "3D 360"
+                            item.shape != Spatial.Shape.FLAT -> "360"
+                            item.stereo -> "3D"
+                            item.video -> "▶"
+                            else -> null
                         }
+                        if (badge != null) zone.ien.hig.CupertinoText(
+                            badge, color = androidx.compose.ui.graphics.Color.White,
+                            modifier = androidx.compose.ui.Modifier.padding(6.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                                .background(androidx.compose.ui.graphics.Color(0xAA000000)).padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
                     }
                 }
             }
-            draw()
+        }
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun Viewer(photo: Photo) {
+        val full = androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, photo.uri) {
+            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                (runCatching { context.contentResolver.loadThumbnail(photo.uri, Size(2400, 1400), null) }.getOrNull()
+                    ?: runCatching { context.contentResolver.openInputStream(photo.uri)?.use { BitmapFactory.decodeStream(it) } }.getOrNull())
+                    ?.asImageBitmap()
+            }
+        }.value
+        androidx.compose.foundation.layout.Box(androidx.compose.ui.Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)) {
+            // Side-by-side photos fill the whole window with nothing over them: each eye samples its own half.
+            if (full != null) androidx.compose.foundation.Image(
+                full, null,
+                contentScale = if (photo.stereo) androidx.compose.ui.layout.ContentScale.FillBounds else androidx.compose.ui.layout.ContentScale.Fit,
+                modifier = androidx.compose.ui.Modifier.fillMaxSize().clickable { open = null }
+            )
+            if (!photo.stereo) androidx.compose.foundation.layout.Row(
+                androidx.compose.ui.Modifier.align(androidx.compose.ui.Alignment.BottomStart).padding(20.dp),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                zone.ien.hig.CupertinoButton(onClick = { open = null }, colors = zone.ien.hig.CupertinoButtonDefaults.tintedButtonColors()) {
+                    zone.ien.hig.CupertinoText("‹ " + tr("Назад"))
+                }
+                if (!photo.video) zone.ien.hig.CupertinoButton(onClick = { makeStereo(photo) }, enabled = !busy) {
+                    zone.ien.hig.CupertinoText(if (busy) "Делаю 3D…" else "Сделать 3D")
+                }
+                status?.let { zone.ien.hig.CupertinoText(it, color = androidx.compose.ui.graphics.Color.White) }
+            }
         }
     }
 
@@ -554,10 +1055,7 @@ class PhotosContent(
                     status = "Нейросеть глубины не скачана: включите её в настройках PhoneXR (${DepthModel.MEGABYTES} МБ)"
                     return@thread
                 }
-                val made = SpatialPhoto.create(context, photo.uri, photo.name) { stage ->
-                    status = stage
-                    draw()
-                }
+                val made = SpatialPhoto.create(context, photo.uri, photo.name) { stage -> status = stage }
                 photos = query()
                 open = photos.firstOrNull { it.uri == made } ?: open
                 status = "Готово: 3D‑копия лежит в галерее"
@@ -565,7 +1063,6 @@ class PhotosContent(
                 status = failure.message ?: "Не получилось сделать 3D"
             } finally {
                 busy = false
-                draw()
             }
         }
     }
@@ -601,79 +1098,4 @@ class PhotosContent(
         }
         list
     }.getOrDefault(emptyList())
-
-    @Synchronized
-    private fun draw() {
-        bitmap.eraseColor(Color.rgb(28, 28, 32))
-        val photo = open
-        if (photo != null) {
-            val full = runCatching { context.contentResolver.loadThumbnail(photo.uri, Size(2400, 1400), null) }.getOrNull()
-                ?: runCatching { context.contentResolver.openInputStream(photo.uri)?.use { BitmapFactory.decodeStream(it) } }.getOrNull()
-            if (full != null) {
-                // Side-by-side photos fill the window; each eye then samples its own half.
-                val scale = if (photo.stereo) minOf(pixelWidth.toFloat() / full.width, pixelHeight.toFloat() / full.height)
-                else minOf(pixelWidth.toFloat() / full.width, pixelHeight.toFloat() / full.height)
-                val w = full.width * scale
-                val h = full.height * scale
-                canvas.drawBitmap(full, null, RectF((pixelWidth - w) / 2, (pixelHeight - h) / 2, (pixelWidth + w) / 2, (pixelHeight + h) / 2), paint)
-            }
-            // A flat photo can be made into a 3D one, right here.
-            if (!photo.stereo && !photo.video) {
-                paint.color = Color.argb(220, 10, 132, 255)
-                canvas.drawRoundRect(RectF(40f, pixelHeight - 110f, 360f, pixelHeight - 30f), 40f, 40f, paint)
-                paint.color = Color.WHITE
-                paint.textSize = 36f
-                canvas.drawText(if (busy) "Делаю 3D…" else "Сделать 3D", 90f, pixelHeight - 58f, paint)
-            }
-            status?.let { text ->
-                paint.color = Color.argb(200, 0, 0, 0)
-                canvas.drawRoundRect(RectF(400f, pixelHeight - 110f, pixelWidth - 40f, pixelHeight - 30f), 40f, 40f, paint)
-                paint.color = Color.WHITE
-                paint.textSize = 32f
-                canvas.drawText(text, 430f, pixelHeight - 58f, paint)
-            }
-        } else {
-            val start = page * PER_PAGE
-            val cellW = pixelWidth / COLUMNS.toFloat()
-            val cellH = pixelHeight * .92f / ROWS
-            photos.drop(start).take(PER_PAGE).forEachIndexed { index, item ->
-                val left = (index % COLUMNS) * cellW
-                val top = (index / COLUMNS) * cellH
-                val thumb = thumbs.getOrPut(item.uri) {
-                    runCatching { context.contentResolver.loadThumbnail(item.uri, Size(400, 300), null) }.getOrNull()
-                        ?: Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-                }
-                canvas.drawBitmap(thumb, null, RectF(left + 8, top + 8, left + cellW - 8, top + cellH - 8), paint)
-                val badge = when {
-                    item.shape != Spatial.Shape.FLAT && item.stereo -> "3D 360"
-                    item.shape != Spatial.Shape.FLAT -> "360"
-                    item.stereo -> "3D"
-                    item.video -> "▶"
-                    else -> null
-                }
-                if (badge != null) {
-                    paint.color = Color.argb(200, 0, 0, 0)
-                    paint.textSize = 28f
-                    val badgeWidth = paint.measureText(badge) + 52
-                    canvas.drawRoundRect(RectF(left + 18, top + 18, left + 18 + badgeWidth, top + 62), 20f, 20f, paint)
-                    paint.color = Color.WHITE
-                    canvas.drawText(badge, left + 44, top + 52, paint)
-                }
-            }
-            paint.color = Color.WHITE
-            paint.textSize = 36f
-            if (photos.isEmpty()) canvas.drawText("Нет фото или нет доступа к галерее", 480f, 480f, paint)
-            canvas.drawText("‹", 60f, pixelHeight - 25f, paint)
-            canvas.drawText("›", pixelWidth - 80f, pixelHeight - 25f, paint)
-        }
-        fresh = true
-    }
-
-    override fun release() = Unit
-
-    companion object {
-        private const val COLUMNS = 4
-        private const val ROWS = 3
-        private const val PER_PAGE = COLUMNS * ROWS
-    }
 }

@@ -1,5 +1,14 @@
 package com.samrat.cardboardhands
 
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.ShoppingBag
+import androidx.compose.material.icons.rounded.People
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.layout.systemBarsPadding
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -209,8 +218,29 @@ class MainActivity : ComponentActivity() {
     }
     /** The VR home needs the camera (passthrough, hands) and the gallery (Spatial Photos). */
     private val enterVr = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        startActivity(Intent(this, VrHomeActivity::class.java))
+        // First start: the permissions are asked while the phone is still in the hand, then the
+        // user has three seconds to put it in the headset.
+        if (readyStep == 1) readyStep = 2 else startActivity(Intent(this, VrHomeActivity::class.java))
     }
+
+    private fun vrPermissions() =
+        if (BuildConfig.BE) arrayOf(Manifest.permission.RECORD_AUDIO)
+        else if (android.os.Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.CAMERA, Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.RECORD_AUDIO)
+        else arrayOf(Manifest.permission.CAMERA, Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.RECORD_AUDIO)
+
+    /** First start: 0 choosing the headset, 1 asking for permissions, 2 "put the phone in the headset". */
+    private var readyStep by mutableIntStateOf(0)
+    /** The setup in VR has not been done yet: the phone only asks whether the user is ready. */
+    private var needsSetup by mutableStateOf(false)
+    /** An avatar model (.glb / .vrm) from the phone's files. */
+    private val chooseAvatar = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) Thread {
+            val bytes = runCatching { contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+            val error = bytes?.let { AvatarModel.save(this, it, AvatarModel.Source.FILE) } ?: tr("Не удалось прочитать файл")
+            runOnUiThread { status = error ?: tr("Аватар сохранён"); resumes++ }
+        }.start()
+    }
+
     /** A Minecraft mod from the phone's files. */
     private val chooseMod = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) Thread {
@@ -271,6 +301,74 @@ class MainActivity : ComponentActivity() {
         setContent { PhoneXRTheme { Root() } }
     }
 
+    /**
+     * The first thing a new user sees: "Выберите шлем" and the headsets; then "put the phone in the headset"
+     * with three seconds counted down, and the VR setup (in the Quest style, with the account)
+     * starts by itself.
+     */
+    @Composable
+    private fun Ready() {
+        val colors = androidx.compose.material3.MaterialTheme.colorScheme
+        Box(
+            Modifier.fillMaxSize().background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(listOf(colors.surfaceContainerLowest, colors.surface))
+            ).systemBarsPadding().padding(28.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            if (readyStep < 2) {
+                // Which headset: its lenses decide where each eye's picture goes.
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    androidx.compose.material3.Text(
+                        tr("Выберите шлем"), color = colors.onSurface, fontSize = 34.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 12.dp, bottom = 10.dp)
+                    )
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        Modifier.fillMaxWidth().weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(Headsets.ALL.size) { i ->
+                            val headset = Headsets.ALL[i]
+                            androidx.compose.material3.Surface(
+                                onClick = {
+                                    Headsets.choose(this@MainActivity, headset)
+                                    readyStep = 1
+                                    enterVr.launch(vrPermissions())
+                                },
+                                shape = RoundedCornerShape(18.dp),
+                                color = colors.surfaceContainerHigh,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+                                    androidx.compose.material3.Text(tr(headset.name), color = colors.onSurface, fontSize = 18.sp)
+                                    androidx.compose.material3.Text(
+                                        tr("Линзы") + ": ${headset.lensesMm} " + tr("мм") + " · ${headset.fovDeg.roundToInt()}°",
+                                        color = colors.onSurfaceVariant, fontSize = 14.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                var left by remember { mutableIntStateOf(3) }
+                LaunchedEffect(Unit) {
+                    while (left > 0) { kotlinx.coroutines.delay(1000); left-- }
+                    readyStep = 0
+                    startActivity(Intent(this@MainActivity, VrHomeActivity::class.java))
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    androidx.compose.material3.Text(
+                        tr("Вставьте телефон в VR‑шлем"), color = colors.onSurface, fontSize = 30.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    androidx.compose.material3.Text(if (left > 0) "$left" else "", color = colors.onSurfaceVariant, fontSize = 64.sp)
+                }
+            }
+        }
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt(KEY_TAB, tab)
@@ -278,6 +376,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // First start: everything (setup and the account) happens in VR, after "Вы готовы?".
+        needsSetup = !Settings.setupDone(this)
+        // Not back to "Вы готовы?" here: the permission dialog also ends in onResume, right after
+        // the answer moved on to the countdown. The countdown itself goes back to 0 when VR starts.
+        if (needsSetup) return
+        // PhoneXR opens only with an account (BE has no friends or calls, so no account either).
+        if (!BuildConfig.BE && Account.current(this) == null) {
+            startActivity(Intent(this, AccountActivity::class.java).putExtra(AccountActivity.EXTRA_REQUIRED, true))
+            return
+        }
         resumes++
         androidApps = BuildConfig.LITE || AndroidAppsContent.enabled(this)
         if (BuildConfig.LITE) AndroidAppsContent.setEnabled(this, true)
@@ -290,14 +398,31 @@ class MainActivity : ComponentActivity() {
         lensOffset = Settings.lensOffsetMm(this)
         sixDof = Settings.load(this).sixDof
         trackingSmoothness = Settings.load(this).trackingSmoothness
-        panelFollows = Settings.panelFollows(this)
         clipboard = Settings.sharedClipboard(this)
         travel = Settings.travelMode(this)
         guest = Settings.guestMode(this)
         if (clipboard) SharedClipboard.start(this)
         refreshGames()
         checkUpdateOnce()
+        keepRuntimeInstalled()
         shizuku = VirtualScreen.access()
+    }
+
+    private var runtimeChecked = false
+
+    /** Once per start: PhoneXR's own OpenXR runtime is installed or updated quietly, if it can be. */
+    private fun keepRuntimeInstalled() {
+        if (runtimeChecked || BuildConfig.LITE) return
+        runtimeChecked = true
+        Thread {
+            if (!VrApiDriver.ready(this)) {
+                val problem = runCatching { VrApiDriver.installQuietly(this) }.getOrElse { it.localizedMessage }
+                runOnUiThread { resumes++; if (problem == null) status = "Драйвер VrApi установлен: игры Quest и Gear VR работают без патча" }
+            }
+            if (PhoneXrRuntime.state(this) == PhoneXrRuntime.State.READY) return@Thread
+            val problem = runCatching { PhoneXrRuntime.installQuietly(this) }.getOrElse { it.localizedMessage }
+            runOnUiThread { resumes++; if (problem == null) status = "PhoneXR Runtime установлен: OpenXR‑игры работают без патча" }
+        }.start()
     }
 
     private fun refreshGames() {
@@ -309,10 +434,11 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun Root() {
+        if (needsSetup) { Ready(); return }
         val backdrop = rememberLayerBackdrop()
         Box(Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize().layerBackdrop(backdrop)) {
-                when (tab) {
+                if (BuildConfig.BE) { if (tab == 0) MenuTab() else SettingsTab() } else when (tab) {
                     0 -> MenuTab()
                     1 -> StoreTab()
                     2 -> FriendsTab()
@@ -320,11 +446,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
             HigTabBar(
-                tabs = listOf(
-                    HigTab(CupertinoIcons.Filled.House, tr("Меню")),
-                    HigTab(CupertinoIcons.Filled.Cart, tr("Магазин")),
-                    HigTab(CupertinoIcons.Filled.Person, tr("Друзья")),
-                    HigTab(CupertinoIcons.Filled.Gearshape, tr("Настройки"))
+                tabs = if (BuildConfig.BE) listOf(
+                    HigTab(androidx.compose.material.icons.Icons.Rounded.Home, tr("Меню")),
+                    HigTab(androidx.compose.material.icons.Icons.Rounded.Settings, tr("Настройки"))
+                ) else listOf(
+                    HigTab(androidx.compose.material.icons.Icons.Rounded.Home, tr("Меню")),
+                    HigTab(androidx.compose.material.icons.Icons.Rounded.ShoppingBag, tr("Магазин")),
+                    HigTab(androidx.compose.material.icons.Icons.Rounded.People, tr("Друзья")),
+                    HigTab(androidx.compose.material.icons.Icons.Rounded.Settings, tr("Настройки"))
                 ),
                 selected = tab,
                 backdrop = backdrop,
@@ -403,6 +532,12 @@ class MainActivity : ComponentActivity() {
             subtitle = "VR на телефоне: руки в камере, Joy‑Con вместо контроллеров",
             bottomInset = TAB_BAR_ROOM
         ) {
+            if (BuildConfig.BE) {
+                HigSection(footer = tr("Камера не нужна: наведите точку в центре на кнопку и коснитесь экрана телефона.")) {
+                    HigLink(tr("Войти в VR")) { enterVr.launch(vrPermissions()) }
+                }
+                return@HigPage
+            }
             if (!sixDof) HigSection(
                 title = "Сейчас работает 3DoF",
                 footer = "Поворот головы и контроллеры работают, но перемещение по комнате, граница, стены, столы и физика комнаты требуют 6DoF."
@@ -415,12 +550,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-            HigSection(footer = "VR‑дом в смешанной реальности: щипок — открыть, кулак — перетащить иконки, ладонь к лицу + щипок — меню. Joy‑Con: ZR или A.") {
+            HigSection(footer = "VR‑дом в смешанной реальности: из руки идёт луч‑указка, щипок — нажать; кулак у левого или правого края окна — перенести его; Joy‑Con: ZR или A.") {
                 HigLink(tr("Войти в VR")) {
-                    enterVr.launch(
-                        if (android.os.Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.CAMERA, Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.RECORD_AUDIO)
-                        else arrayOf(Manifest.permission.CAMERA, Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.RECORD_AUDIO)
-                    )
+                    enterVr.launch(vrPermissions())
                 }
             }
 
@@ -483,8 +615,10 @@ class MainActivity : ComponentActivity() {
         val state = if (resumes >= 0) PhoneXrRuntime.state(this) else PhoneXrRuntime.State.MISSING
         HigSection(
             title = "OpenXR",
-            footer = "PhoneXR Runtime заменяет Monado: OpenXR‑игры получают руки, Joy‑Con и голову от PhoneXR. " +
-                "После установки выберите «PhoneXR Runtime» в OpenXR Runtime Broker."
+            footer = "PhoneXR Runtime — OpenXR на телефоне: игры получают руки, Joy‑Con и голову от PhoneXR. " +
+                "Он сам себе брокер OpenXR, поэтому игры Android XR (Galaxy XR), Pico и новые Quest с загрузчиком Khronos " +
+                "запускаются без патча. Отдельный OpenXR Runtime Broker не нужен — если он стоит, удалите его, иначе он перехватит игры. " +
+                "Старые игры Quest и Gear VR (VrApi) тоже идут без патча — через драйвер VrApi PhoneXR."
         ) {
             when (state) {
                 PhoneXrRuntime.State.READY -> HigRow("PhoneXR Runtime", "Установлен")
@@ -495,10 +629,13 @@ class MainActivity : ComponentActivity() {
                     HigRow("PhoneXR Runtime", "Не входит в эту сборку")
                 }
             }
-            HigLink(
-                "OpenXR Runtime Broker",
-                value = if (PhoneXrRuntime.brokerInstalled(this@MainActivity)) tr("Открыть") else "Google Play"
-            ) { PhoneXrRuntime.openBroker(this@MainActivity) }
+            if (VrApiDriver.ready(this@MainActivity)) HigRow("Драйвер VrApi", "Установлен")
+            else if (VrApiDriver.bundled(this@MainActivity)) HigLink("Установить драйвер VrApi", value = "игры Quest и Gear VR без патча") {
+                VrApiDriver.install(this@MainActivity)
+            }
+            if (PhoneXrRuntime.brokerInstalled(this@MainActivity)) {
+                HigLink("Удалить OpenXR Runtime Broker", value = "не нужен") { uninstall("org.khronos.openxr.runtime_broker") }
+            }
         }
     }
 
@@ -515,7 +652,7 @@ class MainActivity : ComponentActivity() {
         HigItem(
             title = game.label,
             details = listOf(GameLibrary.describe(game) + if (game.checksPurchase) " · проверка покупки Oculus" else ""),
-            detailColor = if (game.kind == GameLibrary.Kind.VRAPI_ORIGINAL || game.kind == GameLibrary.Kind.OPENXR_ORIGINAL)
+            detailColor = if (game.kind == GameLibrary.Kind.VRAPI_ORIGINAL && !VrApiDriver.ready(this@MainActivity))
                 HigColors.accent else Color.Unspecified,
             icon = { AppIcon(game.packageName) },
             onClick = { open(game) }
@@ -789,7 +926,6 @@ class MainActivity : ComponentActivity() {
     private var lensOffset by mutableStateOf(0)
     private var sixDof by mutableStateOf(true)
     private var trackingSmoothness by mutableStateOf(50)
-    private var panelFollows by mutableStateOf(true)
     private var clipboard by mutableStateOf(false)
     private var travel by mutableStateOf(false)
     private var guest by mutableStateOf(false)
@@ -821,43 +957,45 @@ class MainActivity : ComponentActivity() {
         val rates = remember { DisplayRate.available(this) }
         HigPage(title = tr("Настройки"), bottomInset = TAB_BAR_ROOM) {
             HigSection(title = tr("Управление")) {
-                HigLink(tr("Управление и Joy‑Con")) { start(SettingsActivity::class.java) }
-                HigLink(tr("Joy‑Con через камеру")) { start(JoyConCameraActivity::class.java) }
+                HigLink(tr("Управление")) { start(SettingsActivity::class.java) }
             }
             HigSection(
                 title = "Отслеживание головы",
-                footer = "3DoF отслеживает поворот. 6DoF через ARCore отслеживает ещё и перемещение по комнате."
+                footer = "3DoF отслеживает поворот. 6DoF видит комнату камерой (ARCore): можно ходить, работают граница и стол. " +
+                    "Без ARCore 6DoF даёт наклоны головы и движения корпуса по датчикам."
             ) {
                 HigChoice("3DoF", "Поворот головы", !sixDof) {
                     sixDof = false
                     Settings.save(this@MainActivity, Settings.load(this@MainActivity).copy(sixDof = false))
                 }
-                if (BuildConfig.LITE) {
-                    HigRow("6DoF", "Доступно в PhoneXR Full", detailColor = HigColors.secondary)
-                } else {
-                    HigChoice("6DoF", "Поворот и перемещение", sixDof) {
-                        sixDof = true
-                        Settings.save(this@MainActivity, Settings.load(this@MainActivity).copy(sixDof = true))
-                    }
+                HigChoice("6DoF", "Поворот и перемещение по комнате", sixDof) {
+                    sixDof = true
+                    Settings.save(this@MainActivity, Settings.load(this@MainActivity).copy(sixDof = true))
                 }
             }
             if (BuildConfig.LITE) HigSection(
                 title = "Версия",
-                footer = "Lite не включает лицо (Persona), голосового помощника Elix, нейросеть глубины и 6DoF через " +
+                footer = "Lite не включает голосового помощника Elix, нейросеть глубины и 6DoF через " +
                     "ARCore, а камеру рук читает меньшим кадром — так он идёт на недорогих телефонах. " +
                     "Игры, кинотеатр, Joy‑Con и VR‑дом работают так же."
             ) {
                 HigRow("PhoneXR Lite", "Облегчённая сборка", detailColor = HigColors.accent)
             }
-            if (!BuildConfig.LITE) {
-                HigSection(
-                    title = "Лицо",
-                    footer = "Не вынимайте телефон из Cardboard: внешняя камера снимет лицо спереди и с боков."
-                ) {
-                    HigLink(tr("Сканировать камерой"), value = if (resumes >= 0 && Persona.exists(this@MainActivity)) tr("Готово") else null) {
-                        start(PersonaCaptureActivity::class.java)
-                    }
+            HigSection(
+                title = tr("Аватар"),
+                footer = "Сделайте аватар по селфи в Avaturn (нажмите там «Скачать» — PhoneXR заберёт модель сам) " +
+                    "или персонажа в приложении VRoid из Google Play: экспортируйте его в .vrm и загрузите файл сюда."
+            ) {
+                val source = if (resumes >= 0) AvatarModel.source(this@MainActivity) else AvatarModel.Source.STANDARD
+                HigRow(tr("Сейчас"), if (source == AvatarModel.Source.STANDARD) tr("Стандартный") else source.title)
+                HigLink(tr("Создать в Avaturn")) { startActivity(Intent(this@MainActivity, AvatarWebActivity::class.java)) }
+                HigLink(tr("Сделать в VRoid"), value = "Google Play") {
+                    // VRoid makes the character in its own app; PhoneXR then takes the exported .vrm.
+                    AvatarModel.openVroid(this@MainActivity)
+                    status = tr("Сделайте персонажа в VRoid, экспортируйте .vrm и нажмите «Загрузить файл .glb / .vrm»")
                 }
+                HigLink(tr("Загрузить файл .glb / .vrm")) { chooseAvatar.launch(arrayOf("*/*")) }
+                if (source != AvatarModel.Source.STANDARD) HigLink(tr("Вернуть стандартный")) { AvatarModel.reset(this@MainActivity); resumes++ }
             }
             HigSection(
                 title = "Мультидевайс",
@@ -876,10 +1014,10 @@ class MainActivity : ComponentActivity() {
             }
             HigSection(
                 title = "Система",
-                footer = "В транспорте вид перестаёт уезжать за поворотами машины или поезда. " +
-                    "Гостевой режим держит чужую калибровку и настройки отдельно от ваших."
+                footer = "Режим машины: включает 3DoF, вид не уезжает за поворотами машины или поезда, а меню и окна " +
+                    "плавно следуют за взглядом. Гостевой режим держит чужую калибровку и настройки отдельно от ваших."
             ) {
-                HigSwitchRow("Режим транспорта", travel) {
+                HigSwitchRow(tr("Режим машины"), travel) {
                     travel = it
                     Settings.setTravelMode(this@MainActivity, it)
                 }
@@ -888,9 +1026,6 @@ class MainActivity : ComponentActivity() {
                     Settings.setGuestMode(this@MainActivity, it)
                 }
                 HigRow("Объёмный звук", spatialAudio, detailColor = HigColors.secondary)
-            }
-            HigSection(title = tr("Проверка")) {
-                HigLink(tr("Проверить гироскоп Joy‑Con")) { start(GyroTestActivity::class.java) }
             }
             HigSection(
                 title = "Плавность трекинга рук",
@@ -926,10 +1061,6 @@ class MainActivity : ComponentActivity() {
                 HigStepper("Сдвиг картинок под линзы", "$lensOffset мм") { step ->
                     lensOffset = (lensOffset + step).coerceIn(-Settings.MAX_LENS_MM, Settings.MAX_LENS_MM)
                     Settings.setLensOffsetMm(this@MainActivity, lensOffset)
-                }
-                HigSwitchRow("Панель следует за взглядом", panelFollows) {
-                    panelFollows = it
-                    Settings.setPanelFollows(this@MainActivity, it)
                 }
             }
             HigSection(
@@ -990,14 +1121,6 @@ class MainActivity : ComponentActivity() {
                             Settings.setRefresh(this@MainActivity, option)
                         }
                     }
-            }
-            HigSection(
-                title = tr("Оформление"),
-                footer = "Material You берёт цвета из обоев системы на Android 12 и новее."
-            ) {
-                UiStyle.entries.forEach { style ->
-                    HigChoice(style.title, style.detail, Ui.style == style) { Ui.set(this@MainActivity, style) }
-                }
             }
             HigSection {
                 HigLink(tr("Язык"), value = L10n.current.title) { languagePicker = true }
@@ -1063,7 +1186,7 @@ class MainActivity : ComponentActivity() {
 
     private fun open(game: GameLibrary.Game) {
         when (game.kind) {
-            GameLibrary.Kind.VRAPI_ORIGINAL, GameLibrary.Kind.OPENXR_ORIGINAL -> pendingPatch = game
+            GameLibrary.Kind.VRAPI_ORIGINAL -> if (VrApiDriver.ready(this)) requestStart(game) else pendingPatch = game
             GameLibrary.Kind.DAYDREAM -> {
                 if (!Daydream.servicesInstalled(this) && Daydream.bundled(this)) {
                     status = "Сначала установите Opendream Services, затем снова откройте игру"
@@ -1117,22 +1240,65 @@ class MainActivity : ComponentActivity() {
         }
         busy = "Подготовка…"
         Thread {
-            try {
-                val payload = PxrPackage.androidPayload(this, uri)
-                val result = ApkPatcher.patch(this, payload)
-                val conflict = signatureConflict(result.apk)
-                runOnUiThread {
-                    busy = null
-                    ready = Ready(result, label, conflict)
-                }
-            } catch (failure: Throwable) {
-                android.util.Log.e("PhoneXR-Patch", "APK preparation failed for $uri", failure)
-                runOnUiThread {
-                    busy = null
-                    error = failure.localizedMessage ?: failure.javaClass.simpleName
-                }
+            // With PhoneXR Runtime and the VrApi driver in place, a headset game needs no patch: it is
+            // installed as it is, with its own signature. The patch stays for when Android refuses it.
+            val original = if (VrApiDriver.ready(this) && PhoneXrRuntime.state(this) == PhoneXrRuntime.State.READY)
+                runCatching { unchangedGame(PxrPackage.androidPayload(this, uri)) }.getOrNull() else null
+            if (original != null) {
+                runOnUiThread { installUnchanged(original, uri, replaces, label) }
+                return@Thread
             }
+            patchNow(uri, label)
         }.start()
+    }
+
+    /** A copy of the APK behind [uri] when it is a VR game (VrApi or OpenXR), else null. */
+    private fun unchangedGame(uri: Uri): File? {
+        val file = File(File(cacheDir, "patched").apply { mkdirs() }, "original.apk")
+        contentResolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } } ?: return null
+        val vr = java.util.zip.ZipFile(file).use { zip ->
+            zip.entries().toList().any { it.name.startsWith("lib/") && (it.name.endsWith("/libvrapi.so") || it.name.endsWith("/libopenxr_loader.so")) }
+        }
+        return file.takeIf { vr }
+    }
+
+    private fun installUnchanged(file: File, uri: Uri, replaces: GameLibrary.Game?, label: String?) {
+        if (signatureConflict(file) != null) {
+            // Installed before in a patched build (PhoneXR's signature): keep going the patched way.
+            Thread { patchNow(uri, label) }.start()
+            return
+        }
+        busy = "Установка без изменений…"
+        InternalInstaller.install(this, file) { problem ->
+            when {
+                problem == null -> {
+                    busy = null
+                    status = "${label ?: replaces?.label ?: "Игра"} установлена без патча"
+                    refreshGames()
+                }
+                // A phone "has no VR headset" for some Android versions: then the patch makes it optional.
+                problem.contains("FEATURE", ignoreCase = true) -> Thread { patchNow(uri, label) }.start()
+                else -> { busy = null; error = problem }
+            }
+        }
+    }
+
+    private fun patchNow(uri: Uri, label: String?) {
+        try {
+            val payload = PxrPackage.androidPayload(this, uri)
+            val result = ApkPatcher.patch(this, payload)
+            val conflict = signatureConflict(result.apk)
+            runOnUiThread {
+                busy = null
+                ready = Ready(result, label, conflict)
+            }
+        } catch (failure: Throwable) {
+            android.util.Log.e("PhoneXR-Patch", "APK preparation failed for $uri", failure)
+            runOnUiThread {
+                busy = null
+                error = failure.localizedMessage ?: failure.javaClass.simpleName
+            }
+        }
     }
 
     /** Package name of [apk] when that package is installed with other signing keys, else null. */

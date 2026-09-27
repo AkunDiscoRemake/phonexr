@@ -50,3 +50,19 @@ set(ASSET_DIR ${CMAKE_CURRENT_SOURCE_DIR}/build/assets)
 add_custom_command(TARGET vrapi POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E make_directory ${ASSET_DIR}
 	COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:vrapi> ${ASSET_DIR}/libvrapi${ABI_SUFFIX}.so)
+
+# The same VrApi as the system driver of unpatched games (package com.oculus.systemdriver, built by
+# vrapi-driver/build_driver_apk.py): the game's own libvrapi.so loader asks it for every function.
+add_library(phonexr_vrapi SHARED
+	src/vrapi_system.cpp
+	src/vrapi_frame.cpp
+	src/vrapi_swapchain.cpp
+	src/vrapi_input.cpp
+	src/vrapi_driver.cpp)
+target_include_directories(phonexr_vrapi PRIVATE ${VRAPI_ROOT}/Include)
+target_compile_options(phonexr_vrapi PRIVATE ${WARNINGS} -fvisibility=hidden -fvisibility-inlines-hidden)
+target_link_options(phonexr_vrapi PRIVATE -Wl,--no-undefined -Wl,--exclude-libs,ALL -static-libstdc++ -Wl,-Bsymbolic)
+target_link_libraries(phonexr_vrapi PRIVATE phonexr_xr_backend)
+add_custom_command(TARGET phonexr_vrapi POST_BUILD
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${ASSET_DIR}
+	COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:phonexr_vrapi> ${ASSET_DIR}/libphonexr_vrapi${ABI_SUFFIX}.so)

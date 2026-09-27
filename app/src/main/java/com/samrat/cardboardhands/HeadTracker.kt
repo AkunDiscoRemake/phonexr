@@ -37,6 +37,26 @@ class HeadTracker(private val sensors: SensorManager, private val display: () ->
         yawOffset = Float.NaN
     }
 
+    /**
+     * A vector in the phone's own axes (like the linear acceleration) turned into the VR world —
+     * the same world the head turns in, recentring included. False before the first reading.
+     */
+    fun deviceToWorld(v: FloatArray, out: FloatArray): Boolean = synchronized(head) {
+        if (yawOffset.isNaN()) return false
+        val r = rotation
+        // Device -> east, north, up.
+        val e = r[0] * v[0] + r[1] * v[1] + r[2] * v[2]
+        val n = r[3] * v[0] + r[4] * v[1] + r[5] * v[2]
+        val u = r[6] * v[0] + r[7] * v[1] + r[8] * v[2]
+        // East, north, up -> x, -z, y; then the recentring turn.
+        val x = e; val z = -n
+        val c = kotlin.math.cos(-yawOffset); val s = kotlin.math.sin(-yawOffset)
+        out[0] = c * x + s * z
+        out[1] = u
+        out[2] = -s * x + c * z
+        return true
+    }
+
     /** Copies the head rotation into [out] under the tracker's lock. */
     fun copyHead(out: FloatArray) = synchronized(head) { System.arraycopy(head, 0, out, 0, 16) }
 
@@ -60,7 +80,7 @@ class HeadTracker(private val sensors: SensorManager, private val display: () ->
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        SensorManager.getRotationMatrixFromVector(rotation, event.values)
+        synchronized(head) { SensorManager.getRotationMatrixFromVector(rotation, event.values) }
         val r = rotation
         // Device to world (east, north, up) -> head to GL world (x right, y up, z back).
         // Landscape in the headset: screen right is device -Y, or +Y when turned the other way.

@@ -352,6 +352,38 @@ copy_eye_image(ovrTextureSwapChain *chain, int index, int eye, const ovrRectf &r
 	}
 	copy.raw = raw_copy;
 
+	static unsigned probes = 0;
+	if (probes++ % 203 == 0) {
+		// What the game drew: the middle pixel of this eye's image.
+		GLint previous = 0;
+		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous);
+		const std::array<GLuint, 2> fbo = framebuffers();
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+		if (target_of(*chain) == GL_TEXTURE_2D_ARRAY) {
+			glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0, chain->array_size > 1 ? eye : 0);
+		} else {
+			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+		}
+		unsigned char pixel[4] = {};
+		int brightest = 0;
+		for (int gy = 1; gy < 8; gy++) {
+			for (int gx = 1; gx < 8; gx++) {
+				unsigned char sample[4] = {};
+				glReadPixels(x0 + (x1 - x0) * gx / 8, y0 + (y1 - y0) * gy / 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sample);
+				const int sum = sample[0] + sample[1] + sample[2];
+				if (sum >= brightest) {
+					brightest = sum;
+					std::copy(sample, sample + 4, pixel);
+				}
+			}
+		}
+		const GLenum status = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
+		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous));
+		VRAPI_LOG("eye %d: chain %dx%d format 0x%llx array %d, rect %.3f %.3f %.3f %.3f, index %d, brightest %u %u %u %u, fbo 0x%x, error 0x%x",
+		          eye, chain->width, chain->height, static_cast<long long>(chain->format), chain->array_size, rect.x, rect.y,
+		          rect.width, rect.height, index, pixel[0], pixel[1], pixel[2], pixel[3], status, glGetError());
+	}
 	const uint32_t image = backend.acquire_image(copy.xr);
 	blit(texture, target_of(*chain), chain->array_size > 1 ? eye : 0, {x0, y0, x1, y1},
 	     copy.xr->images[image].image, raw_copy);

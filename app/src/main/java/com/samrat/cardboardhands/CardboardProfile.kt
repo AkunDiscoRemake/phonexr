@@ -41,6 +41,32 @@ object CardboardProfile {
         return Settings.DEFAULT_IPD_MM.takeIf { viewerFields >= 2 }
     }
 
+    /**
+     * Network call: most viewers print a short link (goo.gl/…) that only leads to the real profile
+     * (google.com/cardboard/cfg?p=…) when followed. Follows the redirects and returns the address
+     * where they end, or null.
+     */
+    fun resolve(link: String): String? = runCatching {
+        var address = link.trim().let { if (it.startsWith("http")) it else "https://$it" }
+        repeat(6) {
+            if (address.contains("p=")) return address
+            val connection = java.net.URL(address).openConnection() as java.net.HttpURLConnection
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 6000
+            connection.readTimeout = 6000
+            connection.requestMethod = "GET"
+            val code = connection.responseCode
+            val next = connection.getHeaderField("Location")
+            connection.disconnect()
+            if (code !in 300..399 || next == null) return address.takeIf { it.contains("p=") }
+            address = java.net.URL(java.net.URL(address), next).toString()
+        }
+        address.takeIf { it.contains("p=") }
+    }.getOrNull()
+
+    /** A viewer's short link that could not be followed (goo.gl is closed down): still a Cardboard code. */
+    fun isShortLink(value: String) = value.contains("goo.gl", ignoreCase = true) || value.contains("g.co/", ignoreCase = true)
+
     private fun readVarint(data: ByteArray, start: Int): Pair<Int, Int>? {
         var value = 0; var shift = 0; var at = start
         while (at < data.size && shift < 32) {

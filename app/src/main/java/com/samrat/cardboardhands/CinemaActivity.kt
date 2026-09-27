@@ -78,7 +78,8 @@ class CinemaActivity : Activity(), LifecycleOwner {
                 SCENE_ROBLOX -> GlbScene.load(this, "cinema/roblox_house.glb", GlbScene.ROBLOX_HOUSE)
                 SCENE_BRAWL -> PanoramaScene(assets.open("cinema/brawl.jpg").use { BitmapFactory.decodeStream(it) })
                 SCENE_SKY -> null
-                else -> LivingRoomScene(GlbRoom.load(this, "cinema/living_room.glb"))
+                // The living room is gone: games play on the big screen in the open sky.
+                else -> null
             }
         }.onFailure { Log.w(TAG, "Scene $sceneName failed to load", it) }.getOrNull()
         renderer = CinemaRenderer(place, onSurface = { created ->

@@ -25,7 +25,6 @@ object IconPack {
         "own:calls" to "com.google.android.apps.tachyon",
         "own:android" to "com.android.fileexplorer",
         "own:desktop" to "own.desktop",
-        "own:leos" to "own.leos",
     )
 
     fun theme(context: Context): Theme =

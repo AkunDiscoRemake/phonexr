@@ -33,6 +33,11 @@ object HandGestures {
         val indexX: Float = aimX,
         val indexY: Float = aimY,
         val indexExtended: Boolean = false,
+        /** Middle of the palm (wrist and knuckles), image coordinates: where a fist grabs. */
+        val palmX: Float = aimX,
+        val palmY: Float = aimY,
+        /** Index out, middle and ring folded: the pose that presses. An open hand never does. */
+        val pointing: Boolean = false,
     )
 
     /**
@@ -49,11 +54,13 @@ object HandGestures {
         // Pinch hysteresis is applied by the caller; here only the distance relative to the palm.
         val gap = d(4, 8) / palm
         val strength = ((.9f - gap) / .6f).coerceIn(0f, 1f)
-        val tips = intArrayOf(8, 12, 16, 20)
-        val pips = intArrayOf(6, 10, 14, 18)
-        val curled = tips.indices.count { d(0, tips[it]) < d(0, pips[it]) * 1.04f }
-        // A fist hides the thumb-index gap too, so a fist is never a pinch.
-        val fist = curled >= 3
+        val tips = intArrayOf(12, 16, 20)
+        val pips = intArrayOf(10, 14, 18)
+        val others = tips.indices.count { d(0, tips[it]) < d(0, pips[it]) * 1.04f }
+        val indexCurled = d(0, 8) < d(0, 6) * 1.04f
+        // A fist has every finger folded. A pinch with the index bent and the other fingers open
+        // (or closed) is not a fist.
+        val fist = indexCurled && others >= 2
         // Winding of wrist -> index base -> pinky base: for the back camera, a right hand shows its
         // back (palm toward the user) when this turns clockwise in image space.
         val ax = p[5].x() - p[0].x(); val ay = p[5].y() - p[0].y()
@@ -74,7 +81,120 @@ object HandGestures {
             indexX = p[8].x(),
             indexY = p[8].y(),
             indexExtended = d(0, 8) > d(0, 6) * 1.12f,
+            pointing = d(0, 8) > d(0, 6) * 1.12f && d(0, 12) < d(0, 10) * 1.08f && d(0, 16) < d(0, 14) * 1.08f,
+            palmX = (p[0].x() + p[5].x() + p[9].x() + p[17].x()) / 4,
+            palmY = (p[0].y() + p[5].y() + p[9].y() + p[17].y()) / 4,
         )
+    }
+
+    /**
+     * Thumb–index gap in palm widths from MediaPipe's metric landmarks: the same whichever way the
+     * hand is turned. Scaled to match [Shape.pinchGap] (fingertips touching ≈ 0.2).
+     */
+    fun pinchGap3d(world: List<com.google.mediapipe.tasks.components.containers.Landmark>): Float? {
+        if (world.size < 21) return null
+        fun d(a: Int, b: Int): Float {
+            val x = world[a].x() - world[b].x(); val y = world[a].y() - world[b].y(); val z = world[a].z() - world[b].z()
+            return sqrt(x * x + y * y + z * z)
+        }
+        val palm = d(5, 17)
+        if (palm < 1e-3f) return null
+        return d(4, 8) / palm * .8f
+    }
+
+    /**
+     * How far the index fingertip is from the eyes, from the hand's size: MediaPipe gives the hand
+     * in metres ([world]) and on the picture ([image], mapped to view tangents by [scaleX] and
+     * [scaleY]); their ratio is the distance. Several bones are summed so a turned hand still
+     * measures right. The unit follows the view mapping, so it is compared with a reach measured
+     * the same way rather than with real centimetres.
+     */
+    fun tipDepth(image: List<NormalizedLandmark>, world: List<com.google.mediapipe.tasks.components.containers.Landmark>, scaleX: Float, scaleY: Float): Float {
+        if (image.size < 21 || world.size < 21) return 0f
+        var metres = 0f
+        var tangent = 0f
+        for (k in DEPTH_BONES.indices step 2) {
+            val a = DEPTH_BONES[k]; val b = DEPTH_BONES[k + 1]
+            metres += kotlin.math.hypot(world[a].x() - world[b].x(), world[a].y() - world[b].y())
+            tangent += kotlin.math.hypot((image[a].x() - image[b].x()) * 2f * scaleX, (image[a].y() - image[b].y()) * 2f * scaleY)
+        }
+        if (tangent < 1e-4f) return 0f
+        val palm = metres / tangent
+        val centre = (world[0].z() + world[5].z() + world[9].z() + world[13].z() + world[17].z()) / 5f
+        // MediaPipe's z grows away from the camera, so a finger pushed forward adds to the palm's distance.
+        return palm + (world[8].z() - centre)
+    }
+
+    /**
+     * The hand in 3D around the head, in metres (x right, y up, −z ahead), for WebXR pages:
+     * the hand's shape from MediaPipe's metric landmarks, placed at the distance its size on the
+     * picture says, along the ray through the middle knuckle. 63 floats, or null.
+     */
+    fun headPoints(image: List<NormalizedLandmark>, world: List<com.google.mediapipe.tasks.components.containers.Landmark>, scaleX: Float, scaleY: Float): FloatArray? {
+        if (image.size < 21 || world.size < 21) return null
+        var metres = 0f
+        var tangent = 0f
+        for (k in DEPTH_BONES.indices step 2) {
+            val a = DEPTH_BONES[k]; val b = DEPTH_BONES[k + 1]
+            metres += kotlin.math.hypot(world[a].x() - world[b].x(), world[a].y() - world[b].y())
+            tangent += kotlin.math.hypot((image[a].x() - image[b].x()) * 2f * scaleX, (image[a].y() - image[b].y()) * 2f * scaleY)
+        }
+        if (tangent < 1e-4f) return null
+        val distance = (metres / tangent).coerceIn(.12f, 1.2f)
+        val ax = (image[9].x() - .5f) * 2f * scaleX * distance
+        val ay = (.5f - image[9].y()) * 2f * scaleY * distance
+        val out = FloatArray(63)
+        for (i in 0 until 21) {
+            out[i * 3] = ax + (world[i].x() - world[9].x())
+            out[i * 3 + 1] = ay - (world[i].y() - world[9].y())
+            out[i * 3 + 2] = -distance - (world[i].z() - world[9].z())
+        }
+        return out
+    }
+
+    private val DEPTH_BONES = intArrayOf(0, 5, 0, 17, 5, 17, 0, 9, 5, 9, 9, 13, 13, 17)
+
+    /**
+     * Tablet-like touch in the air, as a push: the pointing fingertip presses when it moves forward
+     * by a share of its distance ([push], about 14 % — some 6–7 cm at arm's length) from where it
+     * has been resting, and lets go when it comes back half of that. Measured against the hand's own
+     * resting place, it needs no calibration and works whatever unit the distance is in, and a
+     * hand that is merely raised or held out never presses anything.
+     */
+    class TouchLatch(private val push: () -> Float) {
+        var touching = false
+            private set
+        /** 0 (resting) .. 1 (pressing): how far into a press the fingertip is. */
+        var closeness = 0f
+            private set
+        private var baseline = 0f
+        private var frames = 0
+
+        fun update(depth: Float, pointing: Boolean): Boolean {
+            if (depth <= 0f || !pointing) {
+                reset()
+                return false
+            }
+            if (frames++ == 0) baseline = depth
+            val share = push()
+            if (!touching) {
+                // The resting place drifts with the hand (about a second), but not while pressing.
+                baseline += (depth - baseline) * .06f
+                // A few frames to settle after the hand appears or starts pointing.
+                touching = frames > 6 && depth > baseline * (1f + share)
+            } else {
+                touching = depth > baseline * (1f + share * .5f)
+                if (!touching) baseline = depth
+            }
+            closeness = ((depth / baseline - 1f) / share).coerceIn(0f, 1f)
+            return touching
+        }
+
+        fun reset() {
+            touching = false
+            closeness = 0f
+            frames = 0
+        }
     }
 
     /**

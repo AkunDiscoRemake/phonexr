@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA" />
-    <!-- The Persona's mouth follows the user's voice. -->
+    <!-- The avatar's mouth follows the user's voice. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Spatial Photos in the VR home shows the gallery. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -101,10 +101,9 @@
             android:name=".UpdateActivity"
             android:exported="false" />
         <activity
-            android:name=".PersonaCaptureActivity"
-            android:exported="false"
-            android:screenOrientation="landscape"
-            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+            android:name=".AvatarWebActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false" />
         <activity
             android:name=".VrHomeActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode"

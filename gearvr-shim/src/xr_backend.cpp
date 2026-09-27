@@ -368,6 +368,7 @@ XrBackend::poll_events()
 		if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
 			const auto *changed = reinterpret_cast<XrEventDataSessionStateChanged *>(&event);
 			state_ = changed->state;
+			LOG("session state %d", static_cast<int>(state_));
 			if (state_ == XR_SESSION_STATE_READY) {
 				XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
 				begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;

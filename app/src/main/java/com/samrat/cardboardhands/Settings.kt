@@ -133,11 +133,16 @@ object Settings {
     fun setUserName(context: Context, name: String) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_USER_NAME, name).apply()
 
-    /** The first-start setup in the headset has been completed (or skipped to the end). */
-    fun setupDone(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SETUP_DONE, false)
+    /**
+     * The first-start setup in the headset has been completed (or skipped to the end) — this
+     * version of it: a new setup ([SETUP_VERSION]) runs once more for people who had the old one.
+     */
+    fun setupDone(context: Context) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(KEY_SETUP_VERSION, 0) >= SETUP_VERSION
 
     fun setSetupDone(context: Context, done: Boolean = true) =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_SETUP_DONE, done).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_SETUP_DONE, done).putInt(KEY_SETUP_VERSION, if (done) SETUP_VERSION else 0).apply()
 
     /** The shape of the cinema screen: how wide the picture is and whether it wraps around. */
     enum class ScreenShape(val title: String, val detail: String, val width: Int, val height: Int) {
@@ -233,6 +238,12 @@ object Settings {
      */
     fun travelMode(context: Context) = prefs(context).getBoolean(KEY_TRAVEL, false)
 
+    /** Joy-Con gyroscope read through root (raw HID), for kernels that give Android no Joy-Con sensors. */
+    fun rootJoyCons(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("root_joycons", false)
+
+    fun setRootJoyCons(context: Context, on: Boolean) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("root_joycons", on).apply()
+
     fun setTravelMode(context: Context, travel: Boolean) =
         prefs(context).edit().putBoolean(KEY_TRAVEL, travel).apply()
 
@@ -256,6 +267,9 @@ object Settings {
 
     private const val KEY_USER_NAME = "user_name"
     private const val KEY_SETUP_DONE = "setup_done"
+    private const val KEY_SETUP_VERSION = "setup_version"
+    /** 2: the Horizon look, with "Привет" in the world's languages. */
+    private const val SETUP_VERSION = 2
     private const val KEY_UI_STYLE = "ui_style"
     private const val KEY_SCREEN_SHAPE = "screen_shape"
     private const val KEY_CURVED = "curved_screen"

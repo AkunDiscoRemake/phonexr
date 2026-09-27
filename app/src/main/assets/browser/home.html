@@ -5,32 +5,90 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Браузер PhoneXR</title>
 <style>
-  body { margin: 0; min-height: 100vh; background: linear-gradient(160deg, #1c1c24, #2c2a3a); color: #fff;
-         font: 28px -apple-system, Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; }
-  h1 { font-size: 64px; margin: 70px 0 10px; }
-  p { color: #b9b9c6; margin: 0 0 50px; }
-  form { width: 70%; margin-bottom: 50px; }
-  input { width: 100%; box-sizing: border-box; font-size: 32px; padding: 22px 32px; border-radius: 40px;
-          border: none; background: rgba(255,255,255,.12); color: #fff; }
-  .grid { display: grid; grid-template-columns: repeat(4, 220px); gap: 36px; }
-  a { color: #fff; text-decoration: none; text-align: center; }
-  .tile { width: 150px; height: 150px; margin: 0 auto 14px; border-radius: 50%; display: grid; place-items: center;
-          font-size: 64px; font-weight: 700; }
+  :root { --bg: #1c1c1e; --card: #2c2c2e; --line: #3a3a3c; --label: #fff; --secondary: #98989f; --accent: #ff9544; }
+  * { box-sizing: border-box; }
+  html { zoom: .55; }
+  body { margin: 0; min-height: 100vh; background: linear-gradient(160deg, #1c1c24, #2a2836); color: var(--label);
+         font: 26px -apple-system, "SF Pro Text", Roboto, sans-serif; padding: 40px 70px 60px; }
+  h1 { font-size: 60px; margin: 10px 0 6px; font-weight: 700; }
+  .sub { color: var(--secondary); margin: 0 0 30px; }
+  .search { display: flex; align-items: center; gap: 18px; width: 100%; padding: 22px 32px; border-radius: 40px;
+            background: rgba(255,255,255,.12); color: var(--secondary); font-size: 32px; cursor: text; margin-bottom: 34px; }
+  h2 { font-size: 34px; margin: 30px 0 16px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 26px; }
+  a { color: var(--label); text-decoration: none; }
+  .app { text-align: center; font-size: 24px; }
+  .tile { width: 120px; height: 120px; margin: 0 auto 12px; border-radius: 30px; display: grid; place-items: center;
+          font-size: 52px; font-weight: 700; color: #fff; }
+  .section { background: var(--card); border-radius: 26px; overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 18px; padding: 20px 26px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: none; }
+  .row .text { flex: 1; min-width: 0; }
+  .row .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .url { color: var(--secondary); font-size: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .btn { color: var(--accent); background: none; border: none; font-size: 24px; padding: 8px 12px; }
+  .switch { width: 84px; height: 50px; border-radius: 25px; background: #48484a; position: relative; transition: .2s; flex: none; }
+  .switch::after { content: ""; position: absolute; width: 44px; height: 44px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: .2s; }
+  .switch.on { background: #34c759; } .switch.on::after { left: 37px; }
+  .empty { color: var(--secondary); padding: 22px 26px; }
+  .row.tab .btn { font-size: 30px; }
 </style>
 </head>
 <body>
   <h1>Браузер</h1>
-  <p>Щипок — нажать, щипок и движение — прокрутка</p>
-  <form action="https://www.google.com/search"><input name="q" placeholder="Поиск или адрес"></form>
+  <p class="sub">Щипок — нажать, щипок и движение — прокрутка. WebXR‑сайты открываются в шлеме.</p>
+  <div class="search" onclick="PhoneXR.editAddress()">🔍 Поиск или адрес</div>
+
+  <h2>Избранное</h2>
   <div class="grid">
-    <a href="https://www.google.com"><div class="tile" style="background:#4285f4">G</div>Google</a>
-    <a href="https://m.youtube.com"><div class="tile" style="background:#ff0033">▶</div>YouTube</a>
-    <a href="https://ru.wikipedia.org"><div class="tile" style="background:#636466">W</div>Википедия</a>
-    <a href="https://ya.ru"><div class="tile" style="background:#fc3f1d">Я</div>Яндекс</a>
-    <a href="https://www.twitch.tv"><div class="tile" style="background:#9146ff">T</div>Twitch</a>
-    <a href="https://vk.com"><div class="tile" style="background:#0077ff">VK</div>ВКонтакте</a>
-    <a href="https://minecraft.wiki"><div class="tile" style="background:#5f9f35">⛏</div>Minecraft Wiki</a>
-    <a href="https://github.com"><div class="tile" style="background:#24292f">GH</div>GitHub</a>
+    <a class="app" href="https://www.google.com"><div class="tile" style="background:#4285f4">G</div>Google</a>
+    <a class="app" href="https://m.youtube.com"><div class="tile" style="background:#ff0033">▶</div>YouTube</a>
+    <a class="app" href="https://ru.wikipedia.org"><div class="tile" style="background:#636466">W</div>Википедия</a>
+    <a class="app" href="https://ya.ru"><div class="tile" style="background:#fc3f1d">Я</div>Яндекс</a>
+    <a class="app" href="https://www.twitch.tv"><div class="tile" style="background:#9146ff">T</div>Twitch</a>
+    <a class="app" href="https://vk.com"><div class="tile" style="background:#0077ff">VK</div>ВКонтакте</a>
+    <a class="app" href="https://moonrider.xyz/"><div class="tile" style="background:#e0409f">🌙</div>Moon Rider</a>
+    <a class="app" href="https://github.com"><div class="tile" style="background:#24292f">GH</div>GitHub</a>
   </div>
+
+  <h2>Закладки</h2>
+  <div class="section" id="bookmarks"></div>
+
+  <h2>Настройки</h2>
+  <div class="section">
+    <div class="row" onclick="toggle('desktop')"><div class="text"><div class="title">Версия для ПК</div><div class="url">Сайты как на компьютере</div></div><div class="switch" id="desktop"></div></div>
+    <div class="row" onclick="toggle('adblock')"><div class="text"><div class="title">Блокировка рекламы</div><div class="url">Реклама и трекеры не загружаются</div></div><div class="switch" id="adblock"></div></div>
+    <div class="row" onclick="newTab()"><div class="text"><div class="title">Новая вкладка</div><div class="url">Ещё одно окно браузера рядом</div></div><div class="btn">＋</div></div>
+  </div>
+
+  <h2>История <button class="btn" onclick="PhoneXR.clearHistory(); load()">Очистить</button></h2>
+  <div class="section" id="history"></div>
+
+<script>
+  var data = {};
+  function esc(s) { return String(s).replace(/[&<>"]/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function rows(list, removable) {
+    if (!list || !list.length) return '<div class="empty">' + (removable ? 'Нажмите ☆ в панели над окном, чтобы добавить сайт' : 'Пока пусто') + '</div>';
+    return list.map(function(p) {
+      return '<div class="row"><a class="text" href="' + esc(p.url) + '"><div class="title">' + esc(p.title || p.url) +
+        '</div><div class="url">' + esc(p.url) + '</div></a>' +
+        (removable ? '<button class="btn" onclick="PhoneXR.removeBookmark(\'' + esc(p.url).replace(/'/g, "\\'") + '\'); load()">Удалить</button>' : '') + '</div>';
+    }).join('');
+  }
+  function load() {
+    try { data = JSON.parse(window.PhoneXR ? PhoneXR.homeData() : '{}'); } catch (e) { data = {}; }
+    document.getElementById('bookmarks').innerHTML = rows(data.bookmarks, true);
+    document.getElementById('history').innerHTML = rows(data.history, false);
+    document.getElementById('desktop').classList.toggle('on', !!data.desktop);
+    document.getElementById('adblock').classList.toggle('on', !!data.adblock);
+  }
+  function toggle(name) {
+    var on = !data[name];
+    if (name === 'desktop') PhoneXR.setDesktop(on); else PhoneXR.setAdblock(on);
+    load();
+  }
+  function newTab() { PhoneXR.newTab('file:///android_asset/browser/home.html'); }
+  load();
+</script>
 </body>
 </html>

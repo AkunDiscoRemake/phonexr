@@ -4,6 +4,10 @@
 
 Берёт собранный APK рантайма (openxr-runtime/monado + monado-phonexr.patch) и:
   * называет его «PhoneXR Runtime» везде (брокер OpenXR, лаунчер, служба), ставит иконку PhoneXR;
+  * встраивает системный брокер OpenXR (broker/RuntimeBroker.java): игры с загрузчиком Khronos —
+    Android XR, Pico, новые Quest — находят PhoneXR Runtime сами, без патча;
+  * встраивает GameLauncher: игры из магазина, которым package visibility прячет рантайм, запускаются
+    через него с правом на URI рантайма — и видят его, тоже без патча;
   * убирает сборки для x86 и лишние символы из библиотек (≈97 МБ → ≈25 МБ);
   * подписывает ключом PhoneXR и кладёт в app/src/main/assets/runtime/phonexr-runtime.apk.
 
@@ -21,7 +25,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SDK = os.environ.get("ANDROID_HOME") or os.path.expanduser("~/Library/Android/sdk")
 NAME = "PhoneXR Runtime"
-VERSION_CODE = 3
+VERSION_CODE = 7
 
 
 def build_tool(name):
@@ -81,6 +85,49 @@ def rebrand(folder):
     open(yml, "w", encoding="utf-8").write(text)
 
 
+def add_broker(folder):
+    """Compiles the system runtime broker into an extra dex and declares its provider."""
+    android_jar = sorted(glob.glob(os.path.join(SDK, "platforms", "android-*", "android.jar")))[-1]
+    source = os.path.join(ROOT, "openxr-runtime", "broker")
+    with tempfile.TemporaryDirectory() as work:
+        classes = os.path.join(work, "classes")
+        subprocess.run(["javac", "-source", "11", "-target", "11", "-cp", android_jar, "-d", classes,
+                        *glob.glob(os.path.join(source, "**", "*.java"), recursive=True)], check=True)
+        out = os.path.join(work, "dex")
+        os.makedirs(out)
+        subprocess.run([build_tool("d8"), "--lib", android_jar, "--min-api", "26", "--output", out,
+                        *glob.glob(os.path.join(classes, "**", "*.class"), recursive=True)], check=True)
+        index = 2
+        while os.path.exists(os.path.join(folder, f"classes{index}.dex")):
+            index += 1
+        shutil.copy(os.path.join(out, "classes.dex"), os.path.join(folder, f"classes{index}.dex"))
+    manifest = os.path.join(folder, "AndroidManifest.xml")
+    text = open(manifest, encoding="utf-8").read()
+    provider = ('<provider android:name="org.freedesktop.monado.phonexr.RuntimeBroker" '
+                'android:authorities="org.khronos.openxr.system_runtime_broker" android:exported="true"/>')
+    if "system_runtime_broker" not in text:
+        text = text.replace("</application>", provider + "</application>", 1)
+    # Games from the store run unpatched: started from here with a URI grant, they can see the runtime.
+    launcher = ('<activity android:name="org.freedesktop.monado.phonexr.GameLauncher" android:exported="true" '
+                'android:excludeFromRecents="true" android:noHistory="true" '
+                'android:theme="@android:style/Theme.Translucent.NoTitleBar"/>'
+                '<provider android:name="org.freedesktop.monado.phonexr.VisibilityProvider" '
+                'android:authorities="org.freedesktop.monado.phonexr.visibility" android:exported="false" '
+                'android:grantUriPermissions="true"/>')
+    if "GameLauncher" not in text:
+        text = text.replace("</application>", launcher + "</application>", 1)
+    # Both ARM builds on the phone (lib/arm64 and lib/arm): 32-bit games (Gear VR) need the 32-bit runtime.
+    text = re.sub(r'android:extractNativeLibs="false"', 'android:extractNativeLibs="true"', text)
+    if "android:multiArch" not in text:
+        text = text.replace("<application", '<application android:multiArch="true"', 1)
+    if "android:extractNativeLibs" not in text:
+        text = text.replace("<application", '<application android:extractNativeLibs="true"', 1)
+    # The launcher starts other apps' activities by name: it has to see them.
+    if "QUERY_ALL_PACKAGES" not in text:
+        text = text.replace("<application", '<uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/><application', 1)
+    open(manifest, "w", encoding="utf-8").write(text)
+
+
 def slim(folder):
     lib = os.path.join(folder, "lib")
     for abi in ("x86", "x86_64"):
@@ -99,6 +146,7 @@ def main():
         decoded = os.path.join(work, "decoded")
         subprocess.run(["apktool", "d", "-q", "-s", "-f", arguments.apk, "-o", decoded], check=True)
         rebrand(decoded)
+        add_broker(decoded)
         slim(decoded)
         unsigned = os.path.join(work, "unsigned.apk")
         subprocess.run(["apktool", "b", "-q", decoded, "-o", unsigned], check=True)

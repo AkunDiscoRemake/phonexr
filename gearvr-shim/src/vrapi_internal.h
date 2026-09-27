@@ -19,6 +19,7 @@
 
 #include <array>
 #include <cstdint>
+#include <future>
 #include <mutex>
 #include <vector>
 
@@ -64,11 +65,16 @@ struct Global
 	JavaVM *vm = nullptr;
 	jobject activity = nullptr; // global reference
 	bool initialized = false;
+	// PhoneXR Runtime is connected in the background (see vrapi_Initialize): true once it is up.
+	std::shared_future<bool> backend_ready;
 	Product product = Product::gear_vr;
 	int32_t api_minor_version = 0;
 };
 
 Global &global();
+
+// Whether PhoneXR Runtime is up; with [wait], waits for the background start to finish.
+bool backend_ready(bool wait);
 
 // ovrTextureSwapChain from VrApi.h. Images live in the game's GL context; at submit time the
 // requested image is copied into an OpenXR swapchain, which frees the game to pick any index.

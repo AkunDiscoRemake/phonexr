@@ -28,6 +28,7 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         state = Settings.load(this)
+        rootJoyCons = Settings.rootJoyCons(this)
         setContent { PhoneXRTheme { Screen() } }
     }
 
@@ -58,6 +59,9 @@ class SettingsActivity : ComponentActivity() {
         receiver?.let { unregisterReceiver(it) }
         receiver = null
     }
+
+    private var rootJoyCons by androidx.compose.runtime.mutableStateOf(false)
+    private var rootStatus by androidx.compose.runtime.mutableStateOf<String?>(null)
 
     private fun update(next: Settings.State) {
         state = next
@@ -95,8 +99,8 @@ class SettingsActivity : ComponentActivity() {
 
             HigSection(
                 title = "Joy‑Con",
-                footer = if (interceptEnabled) "Нажмите кнопку на Joy‑Con — она подсветится на схеме. " +
-                    "Нажмите на кнопку на схеме, чтобы назначить ей действие."
+                footer = if (interceptEnabled) "Joy‑Con отслеживаются по руке, которая их держит: положение и поворот — от руки, " +
+                    "кнопки и стик — с Joy‑Con. Настраивать ничего не нужно."
                 else "Без перехвата кнопки Joy‑Con уходят игре как геймпад, а не как контроллеры VR. " +
                     "Включите «PhoneXR Joy‑Con» в «Специальных возможностях»."
             ) {
@@ -109,34 +113,6 @@ class SettingsActivity : ComponentActivity() {
                     HigLink("Включить перехват") { startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)) }
                 }
             }
-            androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
-                JoyConDiagram(state, live.left, live.right) { pickedKey = it }
-            }
-
-            HigSection(
-                title = "Поворот и положение Joy‑Con",
-                footer = "Если гироскоп Joy‑Con недоступен, камера может сама находить Joy‑Con по цвету."
-            ) {
-                val gyro = gyroStatus()
-                HigRow("Гироскоп Joy‑Con", gyro.first, detailColor = gyro.second)
-                HigLink("Проверить гироскоп") {
-                    startActivity(Intent(this@SettingsActivity, GyroTestActivity::class.java))
-                }
-                HigLink("Joy‑Con через камеру", value = if (state.cameraJoyCons) "Вкл." else "Выкл.") {
-                    startActivity(Intent(this@SettingsActivity, JoyConCameraActivity::class.java))
-                }
-            }
-
-            if (!BuildConfig.LITE) HigSection(
-                title = "Метки на Joy‑Con",
-                footer = "Самый точный режим: камера видит напечатанные метки ArUco и даёт положение и полный поворот. " +
-                    "Распечатайте markers/joycon_markers_A4.pdf в масштабе 100%. ID 0–3 — левый Joy‑Con, 4–7 — правый: " +
-                    "слева, середина (сторона с кнопками), справа, сверху. Ровно держите Joy‑Con кнопками к себе, " +
-                    "верхом вверх — это «вперёд». После включения остановите и снова запустите трекинг."
-            ) {
-                HigSwitchRow("Отслеживать по меткам", state.markerJoyCons) { update(state.copy(markerJoyCons = it)) }
-            }
-
             HigSection(
                 title = "Контроллеры",
                 footer = "PhoneXR принимает любые геймпады: Joy‑Con, DualShock, Xbox и безымянные. " +

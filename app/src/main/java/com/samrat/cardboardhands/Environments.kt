@@ -31,9 +31,30 @@ object Environments {
         Place("studio", "Студия"),
     )
 
+    /** The easter egg: open space all around, the version in big letters wherever one looks. */
+    fun eggPanorama(context: Context): Bitmap {
+        val bitmap = panorama(context, "space", 4096)!!
+        val canvas = Canvas(bitmap)
+        stars(canvas, Paint(Paint.ANTI_ALIAS_FLAG), bitmap.width, bitmap.height, 2500, seed = 2001)
+        val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textAlign = Paint.Align.CENTER
+            typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
+        }
+        for (k in 0 until 4) {
+            val x = bitmap.width * (k + .5f) / 4
+            text.textSize = bitmap.height * .09f
+            canvas.drawText(BuildConfig.VERSION_NAME.removeSuffix("-lite"), x, bitmap.height * .5f, text)
+            text.textSize = bitmap.height * .03f
+            canvas.drawText("PhoneXR", x, bitmap.height * .56f, text)
+        }
+        return bitmap
+    }
+
     /** The picture wrapped around the viewer, or null for the real world. */
     fun panorama(context: Context, id: String, width: Int = 2048): Bitmap? {
         if (id == REAL_WORLD) return null
+        if (id == "black") return Bitmap.createBitmap(64, 32, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
         val height = width / 2
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)

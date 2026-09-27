@@ -3,165 +3,208 @@ package com.samrat.cardboardhands
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Color
+import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.SurfaceTexture
-import android.graphics.Typeface
-import android.view.MotionEvent
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import zone.ien.hig.CupertinoButton
+import zone.ien.hig.CupertinoButtonDefaults
+import zone.ien.hig.CupertinoButtonSize
+import zone.ien.hig.CupertinoText
+import zone.ien.hig.theme.CupertinoTheme
 import kotlin.concurrent.thread
 
 /**
- * The "Звонки" app: who is online, calling, and the call itself — the other person's Persona
- * talking with their voice, their hands in front of them, and ours in a small corner.
+ * The "Звонки" app in compose-hig: who is online, calling, and the call itself — the other
+ * person's voice, a circle that breathes while they talk, and their hands in front of them.
  */
-class CallContent(private val context: Context) : VrWindow.Content {
-    override val pixelWidth = 1400
-    override val pixelHeight = 1000
-    override val external = false
-    private val bitmap = Bitmap.createBitmap(pixelWidth, pixelHeight, Bitmap.Config.ARGB_8888)
-    private val canvas = Canvas(bitmap)
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val handsLayer = Bitmap.createBitmap(pixelWidth, pixelHeight, Bitmap.Config.ARGB_8888)
-    private val handsCanvas = Canvas(handsLayer)
-    @Volatile private var fresh = true
+class CallContent(private val context: Context, private val onWatchTogether: (() -> Unit)? = null) : ComposeContent(pixelWidth = 1400, pixelHeight = 1000) {
     @Volatile private var running = true
-    private val buttons = ArrayList<Pair<RectF, () -> Unit>>()
-    private val remoteBlink = Blinker()
-    private val selfBlink = Blinker()
-    private var remoteRenderer: PersonaRenderer? = null
-    private var remoteFaceShown: Persona.Face? = null
-    private val selfRenderer = if (BuildConfig.LITE) null else Persona.load(context)?.let { PersonaRenderer(it) }
     private var voice: Voice? = null
-    private val listener: () -> Unit = { fresh = true }
+    /** Recomposes on every change of the call and on every frame. */
+    private var frame by mutableIntStateOf(0)
+    private val listener: () -> Unit = { frame++ }
     /** People added in the Friends tab; shown first, online or not. */
-    @Volatile private var friends: List<Friends.Person> = emptyList()
+    private var friends by mutableStateOf<List<Friends.Person>>(emptyList())
+    /** The call picture: the other person's hands, drawn off the main thread. */
+    private val stage = Bitmap.createBitmap(900, 900, Bitmap.Config.ARGB_8888)
+    private val stageCanvas = Canvas(stage)
+    private val handsLayer = Bitmap.createBitmap(900, 900, Bitmap.Config.ARGB_8888)
+    private val handsCanvas = Canvas(handsLayer)
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
-    override fun attach(context: Context, texture: SurfaceTexture?, onReady: () -> Unit) {
+    init {
         Calls.listen(listener)
         thread { Calls.start(context) }
-        thread { friends = runCatching { Friends.mine(context) }.getOrDefault(emptyList()); fresh = true }
+        thread { friends = runCatching { Friends.mine(context) }.getOrDefault(emptyList()) }
         voice = VoiceHub.acquire(context)
         thread(name = "PhoneXR calls") {
             while (running) {
-                draw()
-                Thread.sleep(if (Calls.state == Calls.State.IN_CALL) 50 else 200)
+                if (Calls.state == Calls.State.IN_CALL && !BuildConfig.LITE) {
+                    synchronized(stage) { drawStage() }
+                    frame++
+                }
+                Thread.sleep(if (Calls.state == Calls.State.IN_CALL) 50 else 400)
             }
         }
-        onReady()
-    }
-
-    override fun takeBitmap(): Bitmap? = if (fresh) synchronized(this) { fresh = false; bitmap } else null
-
-    override fun toolbarTitle() = when (Calls.state) {
-        Calls.State.IN_CALL -> Calls.peer?.name ?: "Звонок"
-        else -> tr("Звонки")
-    }
-
-    override val toolbarVersion get() = Calls.state.ordinal
-
-    override fun touch(action: Int, u: Float, v: Float) {
-        if (action != MotionEvent.ACTION_UP) return
-        val x = u * pixelWidth; val y = v * pixelHeight
-        val hit = synchronized(this) { buttons.firstOrNull { it.first.contains(x, y) }?.second } ?: return
-        thread { hit(); draw() }
     }
 
     override fun release() {
+        super.release()
         running = false
         Calls.unlisten(listener)
         if (voice != null) VoiceHub.release()
         voice = null
     }
 
-    @Synchronized
-    private fun draw() {
-        buttons.clear()
-        bitmap.eraseColor(Color.TRANSPARENT)
-        paint.color = Color.argb(215, 32, 32, 38)
-        canvas.drawRoundRect(RectF(0f, 0f, pixelWidth.toFloat(), pixelHeight.toFloat()), 60f, 60f, paint)
-        when (Calls.state) {
-            Calls.State.OFFLINE -> offline()
-            Calls.State.IDLE -> contacts()
-            Calls.State.CALLING -> {
-                center("Звоним ${Calls.peer?.name ?: ""}…", 440f, 56f, bold = true)
-                button(RectF(500f, 700f, 900f, 790f), tr("Отменить"), RED) { Calls.hangUp() }
+    @Composable
+    override fun Content() {
+        @Suppress("UNUSED_VARIABLE") val tick = frame
+        Box(Modifier.fillMaxSize().background(CupertinoTheme.colorScheme.systemGroupedBackground)) {
+            when (Calls.state) {
+                Calls.State.OFFLINE -> Offline()
+                Calls.State.IDLE -> Contacts()
+                Calls.State.CALLING -> Centered("Звоним ${Calls.peer?.name ?: ""}…", null) {
+                    Pill(tr("Отменить"), RED) { Calls.hangUp() }
+                }
+                Calls.State.RINGING -> Centered("${Calls.peer?.name ?: "Кто-то"} звонит", if (BuildConfig.LITE) null else "Звонок с персоной") {
+                    Pill(tr("Отклонить"), RED) { Calls.decline() }
+                    Pill(tr("Принять"), GREEN) { Calls.accept() }
+                }
+                Calls.State.IN_CALL -> InCall()
             }
-            Calls.State.RINGING -> {
-                center("${Calls.peer?.name ?: "Кто-то"} звонит", 420f, 60f, bold = true)
-                if (!BuildConfig.LITE) center("Звонок с персоной", 490f, 36f, color = GREY)
-                button(RectF(300f, 680f, 660f, 780f), tr("Отклонить"), RED) { Calls.decline() }
-                button(RectF(740f, 680f, 1100f, 780f), tr("Принять"), GREEN) { Calls.accept() }
-            }
-            Calls.State.IN_CALL -> inCall()
         }
-        fresh = true
     }
 
-    private fun offline() {
-        center(tr("Звонки"), 200f, 64f, bold = true)
+    @Composable
+    private fun Offline() {
         val signedIn = Account.current(context) != null
-        center(if (signedIn) "Подключение…" else "Войдите в аккаунт PhoneXR", 440f, 44f)
-        if (!signedIn) center("На телефоне: PhoneXR → Настройки → Аккаунт", 510f, 34f, color = GREY)
-        else button(RectF(500f, 620f, 900f, 710f), "Повторить", BLUE) { Calls.stop(); Calls.start(context) }
-    }
-
-    private fun contacts() {
-        text(tr("Звонки"), 60f, 110f, 64f, bold = true)
-        text("Вы: ${Account.current(context)?.name ?: ""}", 60f, 170f, 34f, GREY)
-        Calls.message?.let { text(it, 60f, 230f, 32f, Color.rgb(255, 180, 90)) }
-        // Friends first (online ones can be called), then anyone else who is online.
-        val online = Calls.online
-        val friendIds = friends.map { it.id }.toSet()
-        val rows = friends.map { friend ->
-            Triple(Calls.Contact(friend.id, friend.name.ifBlank { friend.username }), online.any { it.id == friend.id }, "@${friend.username}")
-        }.sortedByDescending { it.second } + online.filter { it.id !in friendIds }.map { Triple(it, true, null) }
-        if (rows.isEmpty()) {
-            center(tr("Сейчас никого нет в сети"), 520f, 42f, color = GREY)
-            center("Добавьте друзей во вкладке «Друзья» на телефоне", 580f, 32f, color = GREY)
-            return
-        }
-        rows.take(6).forEachIndexed { i, (contact, isOnline, username) ->
-            val top = 270f + i * 120f
-            paint.color = Color.argb(60, 255, 255, 255)
-            canvas.drawRoundRect(RectF(60f, top, pixelWidth - 60f, top + 100f), 30f, 30f, paint)
-            paint.color = if (isOnline) GREEN else Color.argb(120, 255, 255, 255)
-            canvas.drawCircle(110f, top + 50f, 14f, paint)
-            text(contact.name, 150f, top + 58f, 42f, if (isOnline) Color.WHITE else GREY)
-            username?.let { text(it, 150f, top + 90f, 26f, GREY) }
-            if (isOnline) button(RectF(pixelWidth - 360f, top + 12f, pixelWidth - 80f, top + 88f), tr("Позвонить"), GREEN) { Calls.call(contact) }
-            else text(tr("Не в сети"), pixelWidth - 300f, top + 62f, 32f, GREY)
+        Centered(if (signedIn) "Подключение…" else "Войдите в аккаунт PhoneXR", if (signedIn) null else "На телефоне: PhoneXR → Настройки → Аккаунт") {
+            if (signedIn) Pill("Повторить", CupertinoTheme.colorScheme.accent) { thread { Calls.stop(); Calls.start(context) } }
         }
     }
 
-    private fun inCall() {
-        if (BuildConfig.LITE) {
-            // Lite never renders or transmits a face or hands: only the peer's name and call controls.
-            center(Calls.peer?.name ?: tr("Звонок"), 410f, 68f, bold = true)
-            if (Calls.remoteTalking) center("говорит", 475f, 30f, color = GREEN)
-            button(RectF(360f, 880f, 680f, 970f), if (Calls.muted) "Микрофон выкл." else tr("Микрофон"), if (Calls.muted) RED else Color.argb(120, 255, 255, 255)) {
-                Calls.muted = !Calls.muted
+    @Composable
+    private fun Contacts() {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+            VrTitle(tr("Звонки"), "Вы: ${Account.current(context)?.name ?: ""}")
+            Calls.message?.let { CupertinoText(it, color = Color(0xFFFFB45A), modifier = Modifier.padding(horizontal = 24.dp)) }
+            // Friends first (online ones can be called), then anyone else who is online.
+            val online = Calls.online
+            val friendIds = friends.map { it.id }.toSet()
+            val rows = friends.map { friend ->
+                Triple(Calls.Contact(friend.id, friend.name.ifBlank { friend.username }), online.any { it.id == friend.id }, "@${friend.username}")
+            }.sortedByDescending { it.second } + online.filter { it.id !in friendIds }.map { Triple(it, true, null) }
+            if (rows.isEmpty()) {
+                HigSection(footer = "Добавьте друзей во вкладке «Друзья» на телефоне") { HigRow(tr("Сейчас никого нет в сети")) }
+                return
             }
-            button(RectF(720f, 880f, 1040f, 970f), tr("Завершить"), RED) { Calls.hangUp() }
-            return
+            HigSection(title = "Друзья и в сети") {
+                rows.forEach { (contact, isOnline, username) ->
+                    HigRow(
+                        contact.name,
+                        listOfNotNull(username, if (isOnline) online.firstOrNull { it.id == contact.id }?.status?.ifBlank { null } ?: "в сети"
+                            else tr("Не в сети")).joinToString(" · "),
+                        detailColor = if (isOnline) GREEN else Color.Unspecified,
+                    ) {
+                        // Watching something together: joining is calling in, the page opens by itself.
+                        val watching = online.firstOrNull { it.id == contact.id }?.status == tr("Смотрит вместе")
+                        if (isOnline) Pill(if (watching) tr("Присоединиться") else tr("Позвонить"), GREEN, small = true) { thread { Calls.call(contact) } }
+                    }
+                }
+            }
         }
-        // The other person's Persona, big in the middle.
-        val face = Calls.remoteFace
-        if (face != null && face !== remoteFaceShown) {
-            remoteRenderer = PersonaRenderer(face)
-            remoteFaceShown = face
+    }
+
+    @Composable
+    private fun InCall() {
+        Column(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f)) {
+                    CupertinoText(Calls.peer?.name ?: tr("Звонок"), fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                    if (Calls.remoteTalking) CupertinoText("говорит", color = GREEN)
+                }
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                // Who it is, the circle breathing with their voice, and their hands over it.
+                val name = Calls.peer?.name ?: "?"
+                val grow = 1f + Calls.remoteMouth.coerceIn(0f, 1f) * .12f
+                Box(
+                    Modifier.size(260.dp * grow).clip(CircleShape).background(Color(0xFF1877F2)),
+                    contentAlignment = Alignment.Center
+                ) { CupertinoText(name.take(1).uppercase(), color = Color.White, fontSize = 110.sp, fontWeight = FontWeight.Bold) }
+                Image(synchronized(stage) { stage.asImageBitmap() }, null, modifier = Modifier.size(460.dp))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Pill(if (Calls.muted) "Микрофон выкл." else tr("Микрофон"), if (Calls.muted) RED else Color(0x55FFFFFF)) {
+                    Calls.muted = !Calls.muted; frame++
+                }
+                onWatchTogether?.let { Pill(tr("Смотреть вместе"), Color(0xFF0A84FF)) { it() } }
+                Pill(tr("Завершить"), RED) { Calls.hangUp() }
+            }
         }
-        val persona = remoteRenderer?.render(remoteBlink.value(), Calls.remoteMouth, Calls.remoteRound)
-        val area = RectF(250f, 40f, 1150f, 940f)
-        if (persona != null) canvas.drawBitmap(persona, null, area, paint)
-        else center("Получаем персону…", 460f, 40f, color = GREY)
+    }
+
+    @Composable
+    private fun Centered(title: String, detail: String?, buttons: @Composable () -> Unit) {
+        Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            CupertinoText(title, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+            if (detail != null) CupertinoText(detail, color = CupertinoTheme.colorScheme.secondaryLabel)
+            Spacer(Modifier.height(40.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) { buttons() }
+        }
+    }
+
+    @Composable
+    private fun Pill(label: String, color: Color, small: Boolean = false, onClick: () -> Unit) {
+        CupertinoButton(
+            onClick = onClick,
+            size = if (small) CupertinoButtonSize.Small else CupertinoButtonSize.Large,
+            colors = CupertinoButtonDefaults.filledButtonColors(containerColor = color),
+        ) { CupertinoText(label, color = Color.White, fontWeight = FontWeight.SemiBold) }
+    }
+
+    /** The other person's hands, where they hold them in front of their camera. */
+    private fun drawStage() {
+        val pixelWidth = stage.width
+        val pixelHeight = stage.height
+        stage.eraseColor(AndroidColor.TRANSPARENT)
+        val canvas = stageCanvas
         // Their hands, see-through, where they hold them in front of their camera.
         val hands = Calls.remoteHands
         if (hands.isNotEmpty()) {
-            handsLayer.eraseColor(Color.TRANSPARENT)
+            handsLayer.eraseColor(AndroidColor.TRANSPARENT)
             val handImage = Calls.remoteHandImage
-            val silhouette = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(214, 164, 132) }
+            val silhouette = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(214, 164, 132) }
             for (points in hands) {
                 val xs = FloatArray(21) { points[it * 2] * pixelWidth }
                 val ys = FloatArray(21) { points[it * 2 + 1] * pixelHeight }
@@ -188,54 +231,10 @@ class CallContent(private val context: Context) : VrWindow.Content {
             canvas.drawBitmap(handsLayer, 0f, 0f, paint)
             paint.alpha = 255
         }
-        text(Calls.peer?.name ?: "", 60f, 100f, 48f, bold = true)
-        if (Calls.remoteTalking) text("говорит", 60f, 150f, 30f, GREEN)
-        // Ourselves in the corner.
-        selfRenderer?.let { renderer ->
-            val v = voice
-            val self = renderer.render(selfBlink.value(), if (Calls.muted) 0f else v?.mouthOpen ?: 0f, v?.mouthRound ?: .5f)
-            paint.color = Color.argb(90, 255, 255, 255)
-            val box = RectF(pixelWidth - 300f, 40f, pixelWidth - 40f, 300f)
-            canvas.drawRoundRect(box, 30f, 30f, paint)
-            canvas.drawBitmap(self, null, box, paint)
-        }
-        button(RectF(360f, 880f, 680f, 970f), if (Calls.muted) "Микрофон выкл." else tr("Микрофон"), if (Calls.muted) RED else Color.argb(120, 255, 255, 255)) {
-            Calls.muted = !Calls.muted
-        }
-        button(RectF(720f, 880f, 1040f, 970f), tr("Завершить"), RED) { Calls.hangUp() }
-    }
-
-    private fun button(rect: RectF, label: String, color: Int, action: () -> Unit) {
-        paint.color = color
-        canvas.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, paint)
-        paint.color = Color.WHITE
-        paint.textSize = 38f
-        paint.typeface = Typeface.DEFAULT_BOLD
-        paint.textAlign = Paint.Align.CENTER
-        canvas.drawText(label, rect.centerX(), rect.centerY() + 13f, paint)
-        paint.textAlign = Paint.Align.LEFT
-        paint.typeface = Typeface.DEFAULT
-        buttons += rect to action
-    }
-
-    private fun text(value: String, x: Float, y: Float, size: Float, color: Int = Color.WHITE, bold: Boolean = false) {
-        paint.color = color
-        paint.textSize = size
-        paint.typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-        canvas.drawText(value, x, y, paint)
-        paint.typeface = Typeface.DEFAULT
-    }
-
-    private fun center(value: String, y: Float, size: Float, color: Int = Color.WHITE, bold: Boolean = false) {
-        paint.textAlign = Paint.Align.CENTER
-        text(value, pixelWidth / 2f, y, size, color, bold)
-        paint.textAlign = Paint.Align.LEFT
     }
 
     private companion object {
-        val GREEN = Color.rgb(48, 209, 88)
-        val RED = Color.rgb(255, 69, 58)
-        val BLUE = Color.rgb(10, 132, 255)
-        val GREY = Color.rgb(170, 170, 178)
+        val GREEN = Color(0xFF30D158)
+        val RED = Color(0xFFFF453A)
     }
 }

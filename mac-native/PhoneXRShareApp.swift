@@ -23,11 +23,13 @@ struct ShareView: View {
         NavigationSplitView {
             List(selection: $model.page) {
                 Label("Передача экрана", systemImage: "display.and.arrow.down").tag(SharePage.screen)
+                Label("Управление VR", systemImage: "hand.point.up.left").tag(SharePage.remote)
                 Label("PhoneXR для Android", systemImage: "visionpro").tag(SharePage.android)
             }.navigationTitle(productName)
         } detail: {
             switch model.page {
             case .screen: screenPage
+            case .remote: remotePage
             case .android: androidPage
             }
         }
@@ -57,6 +59,15 @@ struct ShareView: View {
         }
     }
 
+    private var remotePage: some View {
+        page("Управление VR", "Окна VR‑дома на экране Mac: браузер, приложения и игры — мышью и клавиатурой.") {
+            if model.devices.isEmpty {
+                Text("Сначала подключите телефон по USB на странице «PhoneXR для Android».").foregroundStyle(.secondary)
+            }
+            VrRemoteView()
+        }
+    }
+
     private var androidPage: some View {
         page("PhoneXR для Android", "Свежий APK уже находится внутри приложения.") {
             GroupBox("Подключённый телефон") {
@@ -81,11 +92,11 @@ struct ShareView: View {
     private func page<Content: View>(_ title: String, _ subtitle: String, @ViewBuilder content: () -> Content) -> some View {
         ScrollView { VStack(alignment: .leading, spacing: 20) {
             Text(title).font(.largeTitle.bold()); Text(subtitle).font(.title3).foregroundStyle(.secondary); content()
-        }.padding(30).frame(maxWidth: 820, alignment: .leading) }.navigationTitle(title)
+        }.padding(30).frame(maxWidth: 1100, alignment: .leading) }.navigationTitle(title)
     }
 }
 
-enum SharePage: Hashable { case screen, android }
+enum SharePage: Hashable { case screen, remote, android }
 
 struct Device: Identifiable, Hashable {
     let serial: String; let model: String; let state: String
@@ -100,7 +111,7 @@ final class ShareModel: ObservableObject {
     @Published var selectedSerial: String?
     @Published var status = "Подключите Android по USB."
     @Published var busy = false
-    private let bridge = AndroidBridge()
+    let bridge = AndroidBridge()
     var canInstall: Bool { !busy && devices.first { $0.serial == selectedSerial }?.isReady == true }
 
     init() { refresh() }

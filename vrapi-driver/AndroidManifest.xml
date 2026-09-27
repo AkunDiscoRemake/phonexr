@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The package name is the one the VrApi loader inside games opens: it has to be exactly this. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.oculus.systemdriver"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <application
+        android:label="PhoneXR VrApi Driver"
+        android:hasCode="true"
+        android:multiArch="true"
+        android:extractNativeLibs="true">
+        <activity
+            android:name="dev.phonexr.vrapidriver.GameLauncher"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <provider
+            android:name="dev.phonexr.vrapidriver.VisibilityProvider"
+            android:authorities="dev.phonexr.vrapidriver.visibility"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

@@ -22,6 +22,7 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
 import android.opengl.Matrix
+import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
@@ -31,6 +32,33 @@ import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.camera.core.CameraSelector
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.ui.graphics.asAndroidPath
+import androidx.compose.material.icons.rounded.Forum
+import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.Explore
+import androidx.compose.material.icons.rounded.People
+import androidx.compose.material.icons.rounded.Storefront
+import androidx.compose.material.icons.rounded.Android
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.CenterFocusStrong
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.CropFree
+import androidx.compose.material.icons.rounded.Face
+import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.ShoppingBag
+import androidx.compose.material.icons.rounded.SportsEsports
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
@@ -59,8 +87,8 @@ import kotlin.math.hypot
 /**
  * PhoneXR Home, visionOS style, in mixed reality: the camera image fills the view, round app icons
  * float in front, apps open as windows (browser, Minecraft, Spatial Photos) with a move bar,
- * minimize to the dock and close. Pinch clicks; palm toward the face plus a pinch opens the menu.
- * With "controllers" chosen in settings and a Joy-Con connected, ZR or A clicks instead of a pinch.
+ * minimize to the dock and close. The hand aims a cursor and a pinch clicks, a fist at a window's left
+ * or right edge carries it, and a palm held toward the face opens the menu.
  */
 class VrHomeActivity : Activity(), LifecycleOwner {
     private val lifecycleRegistry = LifecycleRegistry(this)
@@ -69,19 +97,45 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     private lateinit var surfaceView: GLSurfaceView
     private lateinit var tracker: HeadTracker
     private val panel = HomePanel()
+    /** Control from the Mac (PhoneXR Share) over USB: see and work the windows with mouse and keys. */
+    private val remote = RemoteControl(object : RemoteControl.Host {
+        override fun windows(): List<VrWindow> = windows.toList()
+        override fun apps(): List<HomePanel.Entry> = synchronized(panel) { panel.homeEntries() }
+        override fun capture(window: VrWindow, maxWidth: Int): Bitmap? {
+            val done = java.util.concurrent.CountDownLatch(1)
+            var picture: Bitmap? = null
+            glTasks += { picture = runCatching { renderer?.capture(window, maxWidth) }.getOrNull(); done.countDown() }
+            done.await(800, java.util.concurrent.TimeUnit.MILLISECONDS)
+            return picture
+        }
+        override fun open(entryId: String) = runOnUiThread {
+            val entry = synchronized(panel) { panel.homeEntries() }.firstOrNull { it.id == entryId } ?: HomePanel.Entry(entryId, "", null)
+            openEntry(entry)
+        }
+        override fun openUrl(url: String) = runOnUiThread {
+            openWindow("web:$url", Uri.parse(url).host ?: url, ID_BROWSER) { BrowserContent(url, ::openWebXr) }
+        }
+        override fun window(window: VrWindow, action: String) = runOnUiThread {
+            when (action) {
+                "minimize" -> minimize(window)
+                "close" -> close(window)
+                else -> restore(window)
+            }
+        }
+    })
+    /** The launcher in compose-hig, drawn on its own virtual display (see [HomePanelContent]). */
+    private var panelContent: HomePanelContent? = null
     /** The app launcher can be hidden from the two-button palm menu without closing app windows. */
     @Volatile private var panelVisible = true
     /** 6DoF with ARCore; null means rotation only (no ARCore, or 6DoF off in settings). */
     @Volatile private var ar: ArTracker? = null
     private var renderer: Renderer? = null
-    private val boundary by lazy { Boundary(this) }
     /** Head position in the world (metres), from ARCore; stays zero in 3DoF. */
     private val headPosition = FloatArray(3)
     /** How the last hand-tracking frame lies on the eye's view (ARCore frames): left, top, width, height. */
     @Volatile private var arFrameMap: FloatArray? = null
     /** The latest ARCore camera frame, kept for "take a photo". */
     @Volatile private var arPhoto: Bitmap? = null
-    @Volatile private var boundaryWarning = false
     private val keyboard = KeyboardPanel()
     private val keyboardRedraw = AtomicBoolean(true)
     @Volatile private var hoveredKey: String? = null
@@ -93,7 +147,6 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     private val busy = AtomicBoolean(false)
     private var handTracker: HandTracker? = null
     private var cameraProvider: ProcessCameraProvider? = null
-    private var joyConReceiver: BroadcastReceiver? = null
 
     @Volatile private var frame: Bitmap? = null
     private val frameLock = Any()
@@ -114,6 +167,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     @Volatile private var viewScaleY = 1f
     /** Landmarks of visible hands (x, y pairs, 21 points each), for the white hand overlay. */
     @Volatile private var handPoints: List<FloatArray> = emptyList()
+    /** The cursor on the view (image coordinates): the hand's aim point, or the Joy-Con's; null with no hand. */
     @Volatile private var pinchPoint: FloatArray? = null
 
     /** Pointer ray in world space (from the eyes), or null without a hand. */
@@ -128,8 +182,6 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         }
     private var drag: Drag? = null
     private var pressedHit: Hit? = null
-    /** Pinch thresholds from the setup's calibration. */
-    private val pinchLatch by lazy { HandProfile.latch(this) }
     /** First-start setup; null once the home is set up. */
     @Volatile private var onboarding: Onboarding? = null
     private var onboardingTexture = 0
@@ -137,15 +189,13 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     @Volatile private var appearStart = 0L
     /** Bone lengths from the setup's hand scan (null before it). */
     private val handProfile by lazy { HandProfile.bones(this) }
-    private var wasPinching = false
-    /** ACTION_DOWN generated by bringing an extended index finger close to an app window. */
-    private var directTouching = false
-    private var joyConDown = false
-    private var stickHeldUntil = 0L
-    private val filterX = HandGestures.OneEuro(minCutoff = .45f, beta = 1.2f, deadZone = .0025f)
-    private val filterY = HandGestures.OneEuro(minCutoff = .45f, beta = 1.2f, deadZone = .0025f)
+    /** Pinch click, with the thresholds from the setup's calibration. */
+    private val pinch by lazy { HandProfile.latch(this) }
+    // Quick to follow a moving finger, still calm when it rests on a button.
+    private val filterX = HandGestures.OneEuro(minCutoff = .9f, beta = 3f, deadZone = .0015f)
+    private val filterY = HandGestures.OneEuro(minCutoff = .9f, beta = 3f, deadZone = .0015f)
     private val steamVrLink = SteamVrLink()
-    /** Which hand drives the cursor: the one that pinches first keeps it until it lets go. */
+    /** Which hand drives the cursor: the one that pinches keeps it until it lets go. */
     private var activeLeft: Boolean? = null
     private var lastMoveSent = 0L
 
@@ -159,9 +209,11 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         data class Bar(val window: VrWindow) : Hit()
         data class Minimize(val window: VrWindow) : Hit()
         data class Close(val window: VrWindow) : Hit()
-        data class Toolbar(val window: VrWindow, val u: Float) : Hit()
+        data class Toolbar(val window: VrWindow, val u: Float, val v: Float) : Hit()
         data class Resize(val window: VrWindow) : Hit()
         data class KeyboardButton(val window: VrWindow) : Hit()
+        data class Expand(val window: VrWindow) : Hit()
+        data class Curve(val window: VrWindow) : Hit()
         data class Keyboard(val window: VrWindow, val u: Float, val v: Float) : Hit()
         data class DesktopWidth(val window: VrWindow, val wider: Boolean) : Hit()
         data class DesktopCurve(val window: VrWindow) : Hit()
@@ -174,7 +226,22 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         return windows.firstOrNull { !it.minimized && it.content.keyboardRequested }
     }
 
-    private fun keyboardCenterY(window: VrWindow) = window.height - window.heightM / 2 - BAR_OFFSET - .09f - KEYBOARD_H / 2
+    private fun keyboardCenterY(window: VrWindow) =
+        window.height + frameBottom(window) - .06f - KEYBOARD_H / 2
+
+    /** Height of the browser's top bar for [window], metres (0 for other windows). */
+    private fun barHeight(window: VrWindow) =
+        if ((window.content as? BrowserContent)?.appMode == false) window.width * WindowChrome.BAR_H / WindowChrome.BAR_W else 0f
+
+    /** Where the window's frame ends below: the bottom of its pill. */
+    private fun frameBottom(window: VrWindow) = -window.heightM / 2 - WindowChrome.PILL_GAP - WindowChrome.PILL_H
+
+    /** Whether the window's pill has a back button (windows with pages of their own, not the browser). */
+    private fun pillBack(window: VrWindow) = (window.content as? BrowserContent)?.appMode == true ||
+        window.content !is BrowserContent && window.content.toolbarTitle() != null
+
+    /** Enlarged with the pill's expand button. */
+    private fun expanded(window: VrWindow) = window.widthScale >= EXPANDED_SCALE - .01f
 
     private data class Drag(val window: VrWindow, val startYaw: Float, val startHeight: Float, val pointerYaw: Float, val pointerHeight: Float, val resize: Boolean = false)
 
@@ -182,6 +249,13 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         super.onCreate(savedInstanceState)
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
         L10n.init(this)
+        // The VR home, too, is only for a signed-in user — except the first setup, which signs in
+        // (or creates the account) itself.
+        if (Account.current(this) == null && Settings.setupDone(this)) {
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
+            finish()
+            return
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -193,15 +267,33 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             setEGLContextClientVersion(2)
             setRenderer(Renderer().also { renderer = it })
             setOnClickListener { recenter() }
+            // A captured mouse sends its movement here instead of moving a pointer on the phone.
+            setOnCapturedPointerListener { _, event -> onMouse(event, captured = true); true }
+            isFocusable = true
+            isFocusableInTouchMode = true
         }
         setContentView(surfaceView)
-        panel.compact = Settings.homeStyle(this) == Settings.HomeStyle.COMPACT
+        // Always the compact panel: the library opens from the panel or the left hand's menu button.
+        panel.compact = true
+        panel.dark = MaterialYouIcons.dark(this)
+        loadRoom()
+        RoomScan.load(this)
+        // The old face scan (Persona) is gone: its pictures of the face are not kept.
+        java.io.File(filesDir, "persona").deleteRecursively()
         if (!Settings.setupDone(this)) onboarding = Onboarding(this, onboardingHost)
-        // Lite keeps to 3DoF: ARCore is the heaviest thing a budget phone would be asked to run.
-        if (!BuildConfig.LITE && Settings.load(this).sixDof && ArTracker.availability(this) == ArTracker.Availability.READY) {
+        // BE has no camera to show the room: a black space around the windows.
+        if (BuildConfig.BE) setEnvironment("black")
+        // 6DoF: ARCore follows the room through the camera (walking, the room scan, the table);
+        // where ARCore is missing (Huawei, Lite) a neck model stands in: the eyes swing around the
+        // neck as the head turns and tilts. Integrating the accelerometer drifted away within seconds.
+        // Car mode is always 3DoF: in a moving car the room itself moves.
+        val sixDof = Settings.load(this).sixDof && !Settings.travelMode(this)
+        if (!BuildConfig.LITE && sixDof && ArTracker.availability(this) == ArTracker.Availability.READY) {
             ar = ArTracker.create(this)
         }
-        trackingExecutor.execute {
+        neckModel = sixDof
+        remote.start()
+        if (!BuildConfig.BE) trackingExecutor.execute {
             handTracker = runCatching { HandTracker(this, useGpu = true, onResult = ::onHands) }
                 .getOrElse { HandTracker(this, useGpu = false, onResult = ::onHands) }
         }
@@ -215,22 +307,28 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         // ARCore owns the camera in 6DoF; if it cannot start, CameraX gives 3DoF passthrough.
         if (ar?.resume() == false) { ar?.close(); ar = null; toast("6DoF недоступен: работает 3DoF") }
         surfaceView.onResume()
-        tracker.travelMode = Settings.travelMode(this)
+        carMode = Settings.travelMode(this)
+        tracker.travelMode = carMode
+        synchronized(panel) { panel.car = carMode }
         tracker.start()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) toast("Разрешите PhoneXR доступ к камере")
+        sensorSixDof?.let { it.reset(); it.start() }
+        if (BuildConfig.BE) Unit
+        else if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) toast("Разрешите PhoneXR доступ к камере")
         else if (ar == null) {
             bindCamera()
-            if (Settings.load(this).sixDof) startArLater()
+            if (Settings.load(this).sixDof && !Settings.travelMode(this)) startArLater()
         }
-        joyConReceiver = JoyConBridge.listen(this) { onJoyCon(it) }
-        JoyConBridge.watch(this, watching = true, learning = false)
         CinemaActivity.setJoyConPassthrough(this, false)
         loadApps()
         Calls.localHands = { handPoints }
         Calls.localHandImage = if (BuildConfig.LITE) ({ null }) else ({ handFrameForCall() })
         Calls.unlisten(callListener)
         Calls.listen(callListener)
-        thread(name = "PhoneXR calls start") { Calls.start(this) }
+        if (!BuildConfig.BE) thread(name = "PhoneXR calls start") { Calls.start(this); Calls.setStatus(tr("В VR")) }
+        Calls.onShared = { url -> watchTogether(url, fromPeer = true) }
+        Calls.onRemoteInput = { input ->
+            runOnUiThread { (windows.firstOrNull { it.id == SHARED_WINDOW }?.content as? SharedContent)?.apply(input) }
+        }
     }
 
     override fun onPause() {
@@ -239,19 +337,21 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         surfaceView.onPause()
         ar?.pause()
         tracker.stop()
+        sensorSixDof?.stop()
         cameraProvider?.unbindAll()
-        JoyConBridge.watch(this, watching = false, learning = false)
-        joyConReceiver?.let { unregisterReceiver(it) }
-        joyConReceiver = null
     }
 
     override fun onDestroy() {
+        remote.stop()
         Calls.unlisten(callListener)
+        Calls.onShared = null
+        Calls.onRemoteInput = null
         Calls.stop()
         Calls.localHandImage = { null }
         steamVrLink.close()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         windows.forEach { it.content.release() }
+        panelContent?.release()
         ar?.close()
         cameraExecutor.shutdownNow()
         trackingExecutor.execute { handTracker?.close() }
@@ -260,6 +360,24 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     }
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** PhoneXR's own 6DoF (the neck and the accelerometer): while ARCore is not running. */
+    private var sensorSixDof: SensorSixDof? = null
+    /** Without ARCore: the eyes' offset from the neck, turned with the head — steady, never drifting. */
+    @Volatile private var neckModel = false
+    private val neckHead = FloatArray(16)
+    private val neckEyes = FloatArray(4)
+
+    private fun neck() {
+        tracker.copyHead(neckHead)
+        // Eyes 8 cm ahead of and 7.5 cm above the neck's pivot (Cardboard's neck model).
+        Matrix.multiplyMV(neckEyes, 0, neckHead, 0, floatArrayOf(0f, NECK_UP, -NECK_FORWARD, 0f), 0)
+        synchronized(headPosition) {
+            headPosition[0] = neckEyes[0]
+            headPosition[1] = neckEyes[1] - NECK_UP
+            headPosition[2] = neckEyes[2] + NECK_FORWARD
+        }
+    }
 
     /**
      * ARCore may still be checking when the home opens: ask again for a few seconds, then move the
@@ -288,11 +406,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
 
     private val onboardingHost = object : Onboarding.Host {
         override val sixDof get() = ar != null
-        override fun startBoundary() = boundary.startTracing()
-        override fun boundaryReady() = boundary.tracing == null && boundary.defined
-        override fun capturePersona() = runOnUiThread {
-            launchPersonaScanner()
-        }
+        override fun tableFound() = RoomScan.table != null
         override fun finish() {
             onboarding = null
             appearStart = SystemClock.elapsedRealtime()
@@ -300,21 +414,42 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        @Suppress("DEPRECATION")
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_PERSONA) {
-            onboarding?.personaDone()
-            windows.mapNotNull { it.content as? SettingsContent }.forEach { it.personaChanged() }
+    /** People: friends, calls, and a room to be in together (the calls window). */
+    private fun openCalls() = runOnUiThread { openWindow("calls", tr("Люди"), ID_PEOPLE) { CallContent(this) { watchTogether() } } }
+
+    /** The easter egg: space all around in 360°, with its own exit button in front. */
+    private fun startEgg() = runOnUiThread {
+        val back = environmentId
+        thread(name = "PhoneXR egg") {
+            val bitmap = runCatching { Environments.eggPanorama(this) }.getOrNull() ?: return@thread
+            glTasks += { renderer?.setEnvironment(bitmap) }
+            redraw.set(true)
         }
+        openWindow(EGG_WINDOW, tr("Выйти"), ID_SETTINGS) {
+            EggExitContent {
+                runOnUiThread {
+                    windows.firstOrNull { it.id == EGG_WINDOW }?.let { close(it) }
+                    setEnvironment(back)
+                }
+            }
+        }
+        windows.firstOrNull { it.id == EGG_WINDOW }?.let { it.widthScale = .3f; it.heightScale = .3f }
     }
 
-    private fun openCalls() = runOnUiThread { openWindow("calls", tr("Звонки"), ID_CALLS) { CallContent(this) } }
+    /** One room in a call: a browser window both people see and both work. */
+    private fun watchTogether(url: String = BrowserContent.HOME, fromPeer: Boolean = false) = runOnUiThread {
+        windows.firstOrNull { it.id == SHARED_WINDOW }?.let { close(it) }
+        openWindow(SHARED_WINDOW, tr("Вместе"), ID_BROWSER) { SharedContent(BrowserContent(url, ::openWebXr)) }
+        Calls.setStatus(tr("Смотрит вместе"))
+        if (!fromPeer) Calls.share(url)
+    }
 
     /** An incoming call brings the Calls window up wherever the user is. */
     private val callListener: () -> Unit = {
-        if (Calls.state == Calls.State.RINGING && windows.none { it.id == "calls" && !it.minimized }) openCalls()
+        synchronized(panel) { panel.alerts = if (panel.dnd) 0 else Calls.online.size }
+        redraw.set(true)
+        // Do not disturb: a call still rings on the phone, but does not open in VR.
+        if (!panel.dnd && Calls.state == Calls.State.RINGING && windows.none { it.id == "calls" && !it.minimized }) openCalls()
     }
 
     private val storeHost = object : StoreContent.Host {
@@ -359,9 +494,11 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     private fun recenter() {
         tracker.recenter()
         ar?.recenter()
+        sensorSixDof?.reset()
     }
 
     private val settingsHost = object : SettingsContent.Host {
+        override fun easterEgg() = startEgg()
         override fun trackingText(): String {
             val tracker = ar
             return when {
@@ -372,28 +509,8 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             }
         }
 
-        override fun showPersona() = runOnUiThread {
-            if (!Persona.exists(this@VrHomeActivity)) toast("Сначала соберите лицо в приложении PhoneXR")
-            else openWindow("persona", tr("Лицо"), ID_PERSONA) { PersonaContent(this@VrHomeActivity) }
-        }
+        override fun avatarWeb(vroid: Boolean) = openAvatarWeb(vroid)
 
-        override fun scanPersona() = runOnUiThread {
-            if (BuildConfig.LITE) return@runOnUiThread toast("Persona недоступна в Lite")
-            launchPersonaScanner()
-        }
-
-        override fun startBoundary() = runOnUiThread { startBoundaryTracing() }
-
-        override fun clearBoundary() {
-            boundary.clear()
-            toast("Граница удалена")
-        }
-
-        override fun boundaryText(): String = when {
-            ar == null -> "Нужен 6DoF (ARCore): без него граница не работает"
-            boundary.defined -> "Граница задана"
-            else -> "Граница не задана"
-        }
 
         override fun startRoomScan() = runOnUiThread {
             val tracker = ar ?: return@runOnUiThread toast("Сканирование комнаты работает только в 6DoF")
@@ -435,22 +552,18 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         }
     }
 
-    /** CameraX must release passthrough before the face scanner can bind the same camera. */
-    private fun launchPersonaScanner() {
-        cameraProvider?.unbindAll()
-        ar?.pause()
-        handler.postDelayed({
-            @Suppress("DEPRECATION")
-            startActivityForResult(Intent(this, PersonaCaptureActivity::class.java), REQUEST_PERSONA)
-        }, 250L)
-    }
-
-    private fun startBoundaryTracing() {
-        if (ar == null) return toast("Граница работает только в 6DoF (нужен ARCore)")
-        windows.firstOrNull { it.id == "settings" }?.let { minimize(it) }
-        switchMode(HomePanel.Mode.HOME)
-        boundary.startTracing()
-        toast("Обойдите край свободного места. Круг замкнётся сам, щипок — готово")
+    /**
+     * The avatar browser: Avaturn to make one from a selfie, or VRoid Hub to take one. A model
+     * downloaded there becomes the user's avatar at once.
+     */
+    private fun openAvatarWeb(vroid: Boolean) = runOnUiThread {
+        val source = if (vroid) AvatarModel.Source.VROID else AvatarModel.Source.AVATURN
+        openWindow("avatar-web", source.title, ID_SETTINGS) {
+            BrowserContent(if (vroid) AvatarModel.VROID_HUB_URL else AvatarModel.AVATURN_URL, ::openWebXr) { bytes, _ ->
+                val error = AvatarModel.save(this, bytes, source)
+                toast(error ?: tr("Аватар сохранён"))
+            }
+        }
     }
 
     // ------------------------------------------------------------------ Apps and windows
@@ -460,26 +573,29 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             val found = runCatching { GameLibrary.scan(this) }.getOrDefault(emptyList())
                 // Games still to be patched are left out: patching happens in the PhoneXR app, not in VR.
                 .filterNot {
-                    it.kind == GameLibrary.Kind.VRAPI_ORIGINAL || it.kind == GameLibrary.Kind.VRAPI_UNSUPPORTED ||
-                        it.kind == GameLibrary.Kind.OPENXR_ORIGINAL
+                    it.kind == GameLibrary.Kind.VRAPI_UNSUPPORTED ||
+                        it.kind == GameLibrary.Kind.VRAPI_ORIGINAL && !VrApiDriver.ready(this)
                 }
             games = found.associateBy { it.packageName }
             // Minecraft stays in the PhoneXR app (PXR Bedrock), not on the MR home screen.
-            // PhoneXR icons (light or dark, chosen with a long pinch on the home) where the pack has one.
-            fun own(id: String, drawn: () -> Drawable) = IconPack.OWN[id]?.let { IconPack.icon(this, it) } ?: drawn()
+            // Material You: PhoneXR's own apps are Material icons on themed tiles; other apps show their
+            // themed (monochrome) icon where they have one.
+            fun own(id: String, label: String, glyph: androidx.compose.ui.graphics.vector.ImageVector) = HomePanel.Entry(id, label, null, glyph = glyph)
             val own = listOf(
-                HomePanel.Entry(ID_BROWSER, tr("Браузер"), own(ID_BROWSER) { drawBrowserIcon() }),
-                HomePanel.Entry(ID_PHOTOS, tr("Фото"), own(ID_PHOTOS) { drawPhotosIcon() }),
-                HomePanel.Entry(ID_SETTINGS, tr("Настройки"), own(ID_SETTINGS) { symbolIcon("⚙", Color.rgb(142, 142, 147)) }),
-                HomePanel.Entry(ID_STORE, tr("Магазин"), own(ID_STORE) { drawStoreIcon() }),
-                HomePanel.Entry(ID_CALLS, tr("Звонки"), own(ID_CALLS) { symbolIcon("✆", Color.rgb(48, 209, 88)) }),
-                HomePanel.Entry(ID_DESKTOP, tr("Компьютер"), own(ID_DESKTOP) { symbolIcon("▣", Color.rgb(10, 132, 255)) }),
-                HomePanel.Entry(ID_LEOS, "LeOS", own(ID_LEOS) { symbolIcon("L", Color.rgb(88, 86, 214)) }),
-            ) + (if (BuildConfig.LITE) emptyList() else listOf(HomePanel.Entry(ID_ELIX, "Elix", drawElixIcon()))) +
-                if (BuildConfig.LITE || AndroidAppsContent.enabled(this)) listOf(HomePanel.Entry(ID_ANDROID, "Android", own(ID_ANDROID) { symbolIcon("▦", Color.rgb(61, 220, 132)) })) else emptyList()
+                own(ID_STORE, tr("Магазин"), Icons.Rounded.Storefront),
+                own(ID_BROWSER, tr("Браузер"), Icons.Rounded.Explore),
+            ) + (if (BuildConfig.BE) emptyList() else listOf(own(ID_PEOPLE, tr("Люди"), Icons.Rounded.People))) + listOf(
+                own(ID_INSTAGRAM, "Instagram", Icons.Rounded.PhotoCamera),
+                own(ID_DISCORD, "Discord", Icons.Rounded.Forum),
+                own(ID_PHOTOS, tr("Фото"), Icons.Rounded.PhotoLibrary),
+                own(ID_SETTINGS, tr("Настройки"), Icons.Rounded.Settings),
+                own(ID_DESKTOP, tr("Компьютер"), Icons.Rounded.Computer),
+            ) +
+                if (BuildConfig.LITE || AndroidAppsContent.enabled(this)) listOf(own(ID_ANDROID, "Android", Icons.Rounded.Android)) else emptyList()
+            val dark = MaterialYouIcons.dark(this)
             val vr = found.map {
                 HomePanel.Entry("app:${it.packageName}", it.label,
-                    IconPack.icon(this, it.packageName) ?: runCatching { packageManager.getApplicationIcon(it.packageName) }.getOrNull())
+                    MaterialYouIcons.themed(this, it.packageName, dark) ?: runCatching { packageManager.getApplicationIcon(it.packageName) }.getOrNull())
             }
             val web = WebApps.installed(this).map { app ->
                 HomePanel.Entry("web:${app.url}", app.name, WebApps.icon(app)?.let { BitmapDrawable(resources, it) } ?: letterIcon(app.name))
@@ -535,7 +651,6 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             }
             id == ID_SETTINGS -> openWindow("settings", tr("Настройки"), ID_SETTINGS) { SettingsContent(this, settingsHost) }
             id == ID_DESKTOP -> openWindow("desktop", tr("Компьютер"), ID_DESKTOP) { DesktopStreamContent { toast(it) } }
-            id == ID_LEOS -> openWindow("leos", "LeOS", ID_LEOS) { BrowserContent("file:///android_asset/leos/index.html", ::openWebXr) }
             id == ID_ANDROID -> openWindow("android", tr("Android‑приложения"), ID_ANDROID) {
                 AndroidAppsContent(this) { name, label ->
                     runOnUiThread {
@@ -544,7 +659,6 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                     }
                 }
             }
-            id == MENU_BOUNDARY -> startBoundaryTracing()
             id == ID_MINECRAFT -> {
                 if (runCatching { packageManager.getApplicationInfo(MINECRAFT, 0) }.isFailure) {
                     toast("Установите Minecraft из Google Play")
@@ -555,11 +669,10 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             id == ID_STORE -> openWindow("store", tr("Магазин"), ID_STORE) { StoreContent(this, storeHost) }
             id.startsWith("env:") -> setEnvironment(id.removePrefix("env:"))
             id.startsWith("person:") -> openCalls()
-            id == ID_CALLS -> openCalls()
-            id == ID_ELIX && BuildConfig.LITE -> toast("Elix есть только в полной версии PhoneXR")
-            id == ID_ELIX -> openWindow("elix", "Elix", ID_ELIX) {
-                ElixContent(this) { action -> runOnUiThread { openEntry(HomePanel.Entry(action, "", null)) } }
-            }
+            id == "own:calls" -> openCalls()
+            id == ID_INSTAGRAM -> openWindow("web:https://www.instagram.com/", "Instagram", ID_INSTAGRAM) { BrowserContent("https://www.instagram.com/", ::openWebXr).apply { appMode = true } }
+            id == ID_DISCORD -> openWindow("web:https://discord.com/app", "Discord", ID_DISCORD) { BrowserContent("https://discord.com/app", ::openWebXr).apply { appMode = true } }
+            id == ID_PEOPLE -> openCalls()
             id.startsWith("app:") -> launchGame(id.removePrefix("app:"))
             id.startsWith("web:") -> id.removePrefix("web:").let { url -> openWindow("web:$url", entry.label, id) { BrowserContent(url, ::openWebXr) } }
             id.startsWith("dock:") -> windows.firstOrNull { it.id == id.removePrefix("dock:") }?.let { restore(it) }
@@ -574,10 +687,10 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                 }
             }
             id == MENU_PHOTO -> takePhoto()
-            id == MENU_TOGGLE_APPS -> {
-                panelVisible = !panelVisible
-                redraw.set(true)
-            }
+            id == MENU_MUTE -> { Calls.muted = !Calls.muted; toast(if (Calls.muted) tr("Микрофон выкл.") else tr("Микрофон")) }
+            id == MENU_PASSTHROUGH -> setEnvironment(if (environmentId == Environments.REAL_WORLD) lastWorld else Environments.REAL_WORLD)
+            id == MENU_TOGGLE_APPS -> toggleLibrary()
+            id == MENU_RECORD -> toggleRecording()
             id == MENU_RECENTER -> { recenter(); switchMode(HomePanel.Mode.HOME) }
             id == MENU_HOME -> switchMode(HomePanel.Mode.HOME)
             id == MENU_EXIT -> {
@@ -639,10 +752,12 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         updateDock()
     }
 
+    /** Open windows go first in the recent part of the dock, with the icon of the app they came from. */
     private fun updateDock() {
-        val icons = synchronized(panel) { panel.homeIcons() }
-        val dock = windows.filter { it.minimized }.map { window ->
-            HomePanel.Entry("dock:${window.id}", window.title, icons[window.iconId] ?: letterIcon(window.title))
+        val home = synchronized(panel) { panel.homeEntries() }.associateBy { it.id }
+        val dock = windows.map { window ->
+            val from = home[window.iconId]
+            HomePanel.Entry("dock:${window.id}", window.title, from?.icon ?: if (from?.glyph == null) letterIcon(window.title) else null, glyph = from?.glyph, tint = window.iconId)
         }
         synchronized(panel) { panel.setDock(dock) }
         redraw.set(true)
@@ -658,8 +773,9 @@ class VrHomeActivity : Activity(), LifecycleOwner {
 
     /** Real photo: the current passthrough frame goes to the gallery (Pictures/PhoneXR). */
     private fun takePhoto() {
-        val bitmap = arPhoto?.takeIf { !it.isRecycled }?.let { runCatching { it.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull() }
-            ?: synchronized(frameLock) { frame?.takeIf { !it.isRecycled }?.copy(Bitmap.Config.ARGB_8888, false) }
+        val bitmap = synchronized(frameLock) {
+            (arPhoto?.takeIf { !it.isRecycled } ?: frame?.takeIf { !it.isRecycled })?.let { runCatching { it.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull() }
+        }
             ?: return toast("Камера ещё не готова")
         switchMode(HomePanel.Mode.HOME)
         thread(name = "PhoneXR photo") {
@@ -671,13 +787,13 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     }
 
     /** Small camera snapshot used to texture real-hand cut-outs in full-version calls. */
-    private fun handFrameForCall(): Bitmap? {
-        val source = arPhoto?.takeIf { !it.isRecycled }
-            ?: synchronized(frameLock) { frame?.takeIf { !it.isRecycled } }
-            ?: return null
-        return runCatching {
+    private fun handFrameForCall(): Bitmap? = synchronized(frameLock) {
+        val source = arPhoto?.takeIf { !it.isRecycled } ?: frame?.takeIf { !it.isRecycled } ?: return null
+        runCatching {
             val width = 320
-            Bitmap.createScaledBitmap(source, width, width * source.height / source.width, true)
+            Bitmap.createBitmap(width, width * source.height / source.width, Bitmap.Config.ARGB_8888).also {
+                Canvas(it).drawBitmap(source, null, android.graphics.Rect(0, 0, it.width, it.height), Paint(Paint.FILTER_BITMAP_FLAG))
+            }
         }.getOrNull()
     }
 
@@ -698,20 +814,113 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    /** A palm turned to the face: its button, head space (tangent units). Right: PhoneXR, left: the menu. */
+    private class PalmButton(val left: Boolean, val x: Float, val y: Float, val radius: Float)
+    @Volatile private var palmButtons: List<PalmButton> = emptyList()
+    private val palmPinched = HashMap<Boolean, Boolean>()
+
+    /**
+     * As on Quest: look at your right palm and pinch — the quick menu; the left palm's pinch shows or
+     * hides the main menu. Returns the hands busy with their palm button.
+     */
+    private fun palmButtons(seen: List<SeenHand>): Set<Boolean> {
+        val buttons = ArrayList<PalmButton>()
+        val busy = HashSet<Boolean>()
+        for (hand in seen) {
+            val shape = hand.shape
+            if (!palmFacesEyes(hand) || shape.fist || hand.left == grabLeft) {
+                palmPinched[hand.left] = false
+                continue
+            }
+            val size = shape.palmWidth * 2f * viewScaleX
+            val x = (shape.pinchX - .5f) * 2f * viewScaleX
+            val y = (.5f - shape.pinchY) * 2f * viewScaleY + size * .18f
+            buttons += PalmButton(hand.left, x, y, size * .2f)
+            busy += hand.left
+            val pinched = shape.pinchGap < .3f
+            val before = palmPinched[hand.left] == true
+            palmPinched[hand.left] = pinched
+            if (pinched && !before) runOnUiThread {
+                if (hand.left) toggleLibrary() else if (handMenu == null) openHandMenu(false) else closeHandMenu()
+            }
+        }
+        seen.map { it.left }.toSet().let { present -> palmPinched.keys.retainAll(present) }
+        palmButtons = buttons
+        return busy
+    }
+
+    /**
+     * The palm really turned to the eyes, fingers up (as when looking at the palm on Quest) — from
+     * the hand's 3D points, so a hand pointing forward never counts and keeps clicking.
+     */
+    private fun palmFacesEyes(hand: SeenHand): Boolean {
+        val p = hand.head ?: return false
+        fun v(i: Int) = floatArrayOf(p[i * 3], p[i * 3 + 1], p[i * 3 + 2])
+        val wrist = v(0); val index = v(5); val pinky = v(17); val middle = v(9)
+        val a = floatArrayOf(index[0] - wrist[0], index[1] - wrist[1], index[2] - wrist[2])
+        val b = floatArrayOf(pinky[0] - wrist[0], pinky[1] - wrist[1], pinky[2] - wrist[2])
+        val sign = if (hand.left) -1f else 1f
+        val n = floatArrayOf(sign * (a[1] * b[2] - a[2] * b[1]), sign * (a[2] * b[0] - a[0] * b[2]), sign * (a[0] * b[1] - a[1] * b[0]))
+        val nl = kotlin.math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).coerceAtLeast(1e-6f)
+        // Towards the eyes: from the palm to the head's origin.
+        val c = floatArrayOf((wrist[0] + middle[0]) / 2, (wrist[1] + middle[1]) / 2, (wrist[2] + middle[2]) / 2)
+        val cl = kotlin.math.sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).coerceAtLeast(1e-6f)
+        val facing = -(n[0] * c[0] + n[1] * c[1] + n[2] * c[2]) / (nl * cl)
+        val up = floatArrayOf(middle[0] - wrist[0], middle[1] - wrist[1], middle[2] - wrist[2])
+        val ul = kotlin.math.sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]).coerceAtLeast(1e-6f)
+        return facing > .6f && up[1] / ul > .55f
+    }
+
+    /** BE, without a camera: the middle of the view aims — a small dot on what it meets. */
+    private fun gaze() {
+        val head = FloatArray(16).also { tracker.copyHead(it) }
+        val direction = FloatArray(4).also { Matrix.multiplyMV(it, 0, head, 0, floatArrayOf(0f, 0f, -1f, 0f), 0) }
+        ray = direction
+        pinchPoint = null
+        val target = hitTest(direction)
+        updateHit(target)
+        val far = when (target) { null -> 1.2f; is Hit.Panel, is Hit.Setup -> panelRadius; else -> windowRadius }
+        beam = floatArrayOf(0f, 0f, 0f, 0f, 0f, -far, 1f)
+        otherBeam = null
+        if (pressing) dragOrMove(direction)
+    }
+
+    /** The library of apps: opens (with the dock) or closes again. */
+    private fun toggleLibrary() = runOnUiThread {
+        panelVisible = true
+        switchMode(if (synchronized(panel) { panel.mode } == HomePanel.Mode.LIBRARY) HomePanel.Mode.HOME else HomePanel.Mode.LIBRARY)
+        redraw.set(true)
+    }
+
+    /** Records what the user sees in VR (one eye, flat) to the gallery, or stops it. */
+    private fun toggleRecording() {
+        val view = renderer ?: return
+        if (view.recording) {
+            view.stopRecording = { saved -> toast(if (saved) tr("Видео сохранено в «Фото»") else tr("Не удалось сохранить видео")) }
+            return
+        }
+        val recorder = runCatching { VideoRecorder(this, 1280, 1152) }.getOrElse { return toast(tr("Не удалось начать запись")) }
+        view.pendingRecorder = recorder
+        toast(tr("Запись началась"))
+    }
+
     /** Compact palm menu: only the two actions that must remain available everywhere. */
     @Volatile private var handMenu: HandMenu? = null
 
-    /** Palm toward the face + pinch: the compact menu above that hand. */
+    /** Palm held toward the face: the compact menu above that hand. */
     private fun openHandMenu(holderLeft: Boolean) {
-        handMenu = HandMenu(holderLeft, listOf(
-            HandMenu.Item(MENU_PHOTO, tr("Скриншот"), symbolIcon("◉", Color.rgb(255, 159, 10))),
-            HandMenu.Item(
-                MENU_TOGGLE_APPS,
-                if (panelVisible) tr("Убрать меню") else tr("Показать меню"),
-                symbolIcon(if (panelVisible) "▣" else "▦", Color.rgb(90, 200, 250)),
-            ),
+        // Material You: the wallpaper's tonal colours, as on the rest of the home.
+        val palette = MaterialYouIcons.palette(this, true)
+        val ink = palette.glyph
+        handMenu = HandMenu(holderLeft, palette.tile, palette.glyph, listOf(
+            HandMenu.Item(MENU_MUTE, if (Calls.muted) tr("Микрофон выкл.") else tr("Микрофон"), vectorIcon(if (Calls.muted) Icons.Rounded.MicOff else Icons.Rounded.Mic, ink)),
+            HandMenu.Item(MENU_RECENTER, tr("Выровнять"), vectorIcon(Icons.Rounded.CenterFocusStrong, ink)),
+            HandMenu.Item(MENU_RECORD, if (renderer?.recording == true) tr("Остановить запись") else tr("Снять видео"),
+                vectorIcon(if (renderer?.recording == true) Icons.Rounded.Stop else Icons.Rounded.Videocam, ink)),
+            HandMenu.Item(MENU_PASSTHROUGH, tr("Видеть комнату"), vectorIcon(Icons.Rounded.Visibility, ink)),
+            HandMenu.Item(MENU_TOGGLE_APPS, tr("Меню"), vectorIcon(Icons.Rounded.Apps, ink)),
         ))
-        pinchLatch.reset()
+        pinch.reset()
         filterX.reset(); filterY.reset()
     }
 
@@ -720,17 +929,15 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     }
 
     private fun openMenu() {
-        val icons = synchronized(panel) { panel.homeIcons() }
-        val entries = windows.map { HomePanel.Entry("dock:${it.id}", it.title, icons[it.iconId] ?: letterIcon(it.title)) } +
-            recent.take(3).mapNotNull { name ->
-                games[name]?.let { HomePanel.Entry("app:$name", it.label, runCatching { packageManager.getApplicationIcon(name) }.getOrNull()) }
-            } + listOf(
-            HomePanel.Entry(MENU_HOME, tr("Главная"), symbolIcon("⌂", Color.rgb(90, 90, 100))),
-            HomePanel.Entry(ID_ELIX, "Elix", drawElixIcon()),
-            HomePanel.Entry(MENU_PHOTO, tr("Снять фото"), symbolIcon("◉", Color.rgb(255, 159, 10))),
-            HomePanel.Entry(MENU_RECENTER, tr("Выровнять"), symbolIcon("◎", Color.rgb(48, 176, 199))),
-            HomePanel.Entry(MENU_BOUNDARY, tr("Граница"), symbolIcon("⬡", Color.rgb(90, 200, 250))),
-            HomePanel.Entry(MENU_EXIT, tr("Выйти из VR"), symbolIcon("✕", Color.rgb(255, 69, 58))),
+        val home = synchronized(panel) { panel.homeEntries() }.associateBy { it.id }
+        val entries = windows.map { window ->
+            val from = home[window.iconId]
+            HomePanel.Entry("dock:${window.id}", window.title, from?.icon ?: if (from?.glyph == null) letterIcon(window.title) else null, glyph = from?.glyph, tint = window.iconId)
+        } + recent.take(3).mapNotNull { name -> home["app:$name"] } + listOf(
+            HomePanel.Entry(MENU_HOME, tr("Главная"), null, glyph = Icons.Rounded.Home),
+            HomePanel.Entry(MENU_PHOTO, tr("Снять фото"), null, glyph = Icons.Rounded.PhotoCamera),
+            HomePanel.Entry(MENU_RECENTER, tr("Выровнять"), null, glyph = Icons.Rounded.CenterFocusStrong),
+            HomePanel.Entry(MENU_EXIT, tr("Выйти из VR"), null, glyph = Icons.Rounded.Close),
         )
         synchronized(panel) { panel.setMenu(entries) }
         switchMode(HomePanel.Mode.MENU)
@@ -739,6 +946,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     private fun switchMode(mode: HomePanel.Mode) {
         synchronized(panel) {
             panel.mode = mode
+            panel.closeSearch()
             panel.showPage(0)
         }
         redraw.set(true)
@@ -782,34 +990,52 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    /** Joy-Con clicks only when "controllers" is chosen in settings and one is connected; otherwise hands click. */
-    private fun controllersClick(): Boolean =
-        Settings.load(this).handMode == Settings.HandMode.CONTROLLERS &&
-            InputDevice.getDeviceIds().any { JoyConButtons.isJoyCon(InputDevice.getDevice(it)) }
-
     private fun onHands(result: HandLandmarkerResult) {
         val now = SystemClock.elapsedRealtimeNanos()
         // The camera frame this result belongs to: the head is looked up for that moment.
         val frameNs = result.timestampMs() * 1_000_000L
         // ARCore frames: landmarks are on the upright camera image; place them on the eye's view.
         val map = arFrameMap
-        val landmarks = result.landmarks().map { points ->
+        val raw = result.landmarks().map { points ->
             if (map == null) points
             else points.map { NormalizedLandmark.create(map[0] + it.x() * map[2], map[1] + it.y() * map[3], it.z()) }
         }
+        // Every point of each hand through a One Euro filter: steady while the hand holds still,
+        // no lag when it moves — the silhouette, the ray and the pinch all stop trembling.
+        val landmarks = raw.mapIndexed { index, points ->
+            if (points.size < 21) return@mapIndexed points
+            val label = result.handednesses().getOrNull(index)?.firstOrNull()?.categoryName() ?: "hand$index"
+            handSmoothers.getOrPut(label) { LandmarkSmoother() }.smooth(points, frameNs)
+        }
+        // A hand that is gone starts afresh next time instead of sliding in from where it was.
+        val present = raw.indices.mapNotNull { result.handednesses().getOrNull(it)?.firstOrNull()?.categoryName() }.toSet()
+        handSmoothers.keys.retainAll(present)
         handPoints = landmarks.filter { it.size >= 21 }.map { points ->
             FloatArray(63) { i -> when (i % 3) { 0 -> points[i / 3].x(); 1 -> points[i / 3].y(); else -> points[i / 3].z() } }
         }
-        val hands = landmarks.mapIndexedNotNull { index, points ->
+        val world = result.worldLandmarks()
+        val seen = landmarks.mapIndexedNotNull { index, points ->
             if (points.size < 21) return@mapIndexedNotNull null
             val physicalLeft = result.handednesses().getOrNull(index)?.firstOrNull()?.categoryName().equals("Right", true)
-            physicalLeft to HandGestures.shape(points, physicalLeft)
+            val depth = world.getOrNull(index)?.let { HandGestures.tipDepth(points, it, viewScaleX, viewScaleY) } ?: 0f
+            val head = world.getOrNull(index)?.let { HandGestures.headPoints(points, it, viewScaleX, viewScaleY) }
+            SeenHand(physicalLeft, HandGestures.shape(points, physicalLeft), depth, head)
         }
+        val hands = seen.map { it.left to it.shape }
         val steamHead = FloatArray(16).also { tracker.copyHead(it) }
         val steamPosition = synchronized(headPosition) { headPosition.copyOf() }
         steamVrLink.send(steamHead, steamPosition, hands.map { SteamVrLink.Hand(it.first, it.second) })
         onboarding?.onHands(hands, handPoints)
-        // The hand menu rides on the hand that called it; the other hand points at it.
+
+
+        // An immersive WebXR page fills the view: a push of the finger is its "select", and the
+        // palm held toward the face leaves it.
+        windows.firstOrNull { it.content.immersive }?.let { xrWindow ->
+            immersiveInput(xrWindow, seen, now)
+            return
+        }
+
+        // The hand menu rides on the hand that called it; the other hand touches it.
         val menu = handMenu
         if (menu != null) {
             val holder = landmarks.indices.firstOrNull { index ->
@@ -820,117 +1046,376 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                 fun tx(i: Int) = (holder[i].x() - .5f) * 2f * viewScaleX
                 fun ty(i: Int) = (.5f - holder[i].y()) * 2f * viewScaleY
                 val palm = intArrayOf(0, 5, 9, 17)
-                menu.follow(palm.map { tx(it) }.average().toFloat(), palm.map { ty(it) }.average().toFloat(),
+                // Placed once where the hand opened it (as on Quest).
+                if (menu.x.isNaN()) menu.follow(palm.map { tx(it) }.average().toFloat(), palm.map { ty(it) }.average().toFloat(),
                     kotlin.math.hypot(tx(9) - tx(0), ty(9) - ty(0)))
-            } else if (System.currentTimeMillis() - menu.lastSeen > 1500) {
-                closeHandMenu()
             }
+            // Then it stays in the room: fixed as a world direction, redrawn where it now is in view.
+            if (!menu.x.isNaN()) {
+                val headNow = FloatArray(16).also { tracker.copyHeadAt(frameNs, it) }
+                val world = menu.world ?: FloatArray(4).also {
+                    Matrix.multiplyMV(it, 0, headNow, 0, floatArrayOf(menu.x, menu.y, -1f, 0f), 0)
+                    menu.world = it
+                }
+                val toHead = FloatArray(16).also { Matrix.transposeM(it, 0, headNow, 0) }
+                val local = FloatArray(4).also { Matrix.multiplyMV(it, 0, toHead, 0, world, 0) }
+                if (local[2] < -.05f) { menu.x = local[0] / -local[2]; menu.y = local[1] / -local[2] }
+            }
+            // It stays open where it is until an item is picked or the palm button is pinched again.
         }
-        // Keep the hand that holds the cursor; otherwise a pinching hand, otherwise the nearest one.
-        val chosen = if (menu != null) hands.firstOrNull { it.first != menu.holderLeft }
-        else hands.firstOrNull { it.first == activeLeft && (pinchLatch.pinching || wasPinching) }
-            ?: hands.firstOrNull { it.second.pinchGap < .3f }
-            ?: hands.maxByOrNull { it.second.palmWidth }
-        if (chosen != null && chosen.first != activeLeft) {
+
+        // A fist at the left or right edge of a window takes it; opening the hand lets go.
+        grabWindows(seen, frameNs)
+
+        // NEAR: a fingertip close to a window touches it directly, and the pointer is off.
+        // FAR (below): the pointer, exactly as before.
+        if (menu == null && !mouseActive() && directTouch(seen, frameNs)) return
+
+        // The pointing hand: the one already pinching keeps the ray, else a pinching one, else the nearest.
+        val pointing = seen.filter { it.left != grabLeft }
+        val chosen = pointing.firstOrNull { it.left == activeLeft && pinch.pinching }
+            ?: pointing.firstOrNull { it.shape.pinchGap < .3f }
+            ?: pointing.maxByOrNull { it.shape.palmWidth }
+        if (chosen != null && chosen.left != activeLeft) {
             if (activeLeft != null) { filterX.reset(); filterY.reset() }
-            activeLeft = chosen.first
+            if (pinch.pinching) { pinch.reset(); release() }
+            activeLeft = chosen.left
         }
-        val hand = chosen?.second
+        val hand = chosen?.shape
+        // A mouse in use owns the pointer; the hands are still drawn.
+        if (mouseActive()) { beam = null; otherBeam = null; return }
         if (hand == null) {
             activeLeft = null
-            filterX.reset(); filterY.reset(); pinchLatch.reset()
+            filterX.reset(); filterY.reset(); pinch.reset()
             ray = null
             pinchPoint = null
-            if (!controllersClick()) release()
+            beam = null; otherBeam = null
+            // A Joy-Con button held down keeps its press even when the hand leaves the camera.
+            if (menu == null && !mouseDown) release()
             updateHit(null)
             return
         }
-        val x = filterX.filter(hand.aimX, now)
-        val y = filterY.filter(hand.aimY, now)
-        var direction = pointerRay(x, y, frameNs)
+        // The ray, as on Quest: it leaves the hand (between the thumb and index knuckles, which
+        // stay put while the fingers pinch) and goes on away from the shoulder, so the ring sits a
+        // little ahead of the hand. Worked out on the view itself: the hand's depth from the camera
+        // is too noisy to steer by.
+        val baseX = (hand.aimX - .5f) * 2f * viewScaleX
+        val baseY = (.5f - hand.aimY) * 2f * viewScaleY
+        val rightSide = chosen.head?.let { it[0] > 0f } ?: (baseX > 0f)
+        val shoulderX = if (rightSide) SHOULDER_X else -SHOULDER_X
+        val rawX = baseX + (baseX - shoulderX) * RAY_LEAD
+        val rawY = baseY + (baseY - SHOULDER_Y) * RAY_LEAD
+        val tx = filterX.filter(rawX, now)
+        val ty = filterY.filter(rawY, now)
+        val direction = tangentRay(tx, ty, frameNs)
         ray = direction
-        pinchPoint = floatArrayOf(x, y)
+        pinchPoint = null
+        val wasPinching = pinch.pinching
+        val pinching = pinch.update(hand)
         if (menu != null) {
-            // While the menu is open the pointer only chooses in it.
-            val lx = (x - .5f) * 2f * viewScaleX
-            val ly = (.5f - y) * 2f * viewScaleY
-            menu.hover(menu.itemAt(lx, ly))
+            menu.hover(menu.itemAt(tx, ty))
             updateHit(null)
-            val pinchingMenu = pinchLatch.update(hand)
-            if (pinchingMenu && !wasPinching) {
-                wasPinching = true
-                val item = menu.item(menu.itemAt(lx, ly))
+            beam = null; otherBeam = null
+            if (pinching && !wasPinching) {
+                val item = menu.item(menu.itemAt(tx, ty))
                 closeHandMenu()
                 if (item != null) runOnUiThread { openEntry(HomePanel.Entry(item.id, item.label, item.icon)) }
-            } else if (!pinchingMenu) wasPinching = false
+            }
             return
         }
         val target = hitTest(direction)
         updateHit(target)
-        if (controllersClick()) {
-            dragOrMove(direction)
+        // The beam ends where it meets what it points at (about the distance of the home or a window).
+        beam = beamFor(baseX, baseY, tx, ty, target)
+        // Two hands, as on Quest: the other hand has its own cursor too; a pinch makes it the one that clicks.
+        otherBeam = pointing.firstOrNull { it.left != chosen.left }?.let { other ->
+            if (other.left != otherLeft) { otherFilterX.reset(); otherFilterY.reset(); otherLeft = other.left }
+            val ox = (other.shape.aimX - .5f) * 2f * viewScaleX
+            val oy = (.5f - other.shape.aimY) * 2f * viewScaleY
+            val oShoulder = if (other.head?.let { it[0] > 0f } ?: (ox > 0f)) SHOULDER_X else -SHOULDER_X
+            val otx = otherFilterX.filter(ox + (ox - oShoulder) * RAY_LEAD, now)
+            val oty = otherFilterY.filter(oy + (oy - SHOULDER_Y) * RAY_LEAD, now)
+            beamFor(ox, oy, otx, oty, hitTest(tangentRay(otx, oty, frameNs)))
+        }
+        when {
+            pinching && !wasPinching -> press(target, direction)
+            pinching -> dragOrMove(direction)
+            wasPinching -> release()
+        }
+    }
+
+    // ------------------------------------------------------------------ direct touch (NEAR)
+
+    /** The window the index fingertip is near, and whose hand it is (null: FAR, the pointer). */
+    private var nearWindow: VrWindow? = null
+    private var nearLeft = false
+    /** The finger is on the window's surface: a touch is down. */
+    private var touching = false
+    /** Smoothed distance of the fingertip in front of the window's plane (metres), and where on it. */
+    private var nearD = 0f
+    private var nearU = 0f
+    private var nearV = 0f
+
+    /**
+     * Direct touch, like a tablet: the index fingertip (in 3D, from the hand's metric landmarks)
+     * against the plane of each flat window. Within [NEAR_DISTANCE] of a window, inside its edges,
+     * the pointer goes away; the finger reaching the surface is ACTION_DOWN, moving on it
+     * ACTION_MOVE, pulling back ACTION_UP — one contact, one press. The distance is smoothed, and
+     * the way in and the way out have different thresholds, so tracking jitter does not click.
+     * True while NEAR (the pointer must stay off).
+     */
+    private fun directTouch(seen: List<SeenHand>, frameNs: Long): Boolean {
+        val head = FloatArray(16).also { tracker.copyHeadAt(frameNs, it) }
+        val position = synchronized(headPosition) { headPosition.copyOf() }
+        class Near(val left: Boolean, val window: VrWindow, val d: Float, val u: Float, val v: Float, val tip: FloatArray)
+        var best: Near? = null
+        val rotate = FloatArray(16)
+        val local = FloatArray(4)
+        for (hand in seen) {
+            if (hand.left == grabLeft) continue
+            val p = hand.head ?: continue
+            // Only a finger within real arm's reach touches: a far hand's distance is a guess that
+            // tops out near the windows' own distance and would take the pointer away.
+            if (kotlin.math.sqrt(p[24] * p[24] + p[25] * p[25] + p[26] * p[26]) > ARM_REACH) continue
+            // Landmark 8: the tip of the index finger, head space → world.
+            val w = FloatArray(4)
+            Matrix.multiplyMV(w, 0, head, 0, floatArrayOf(p[24], p[25], p[26], 0f), 0)
+            val tip = floatArrayOf(w[0] + position[0], w[1] + position[1], w[2] + position[2], 1f)
+            for (window in windows) {
+                if (window.minimized || window.arcDegrees > 0f || window.content.immersive) continue
+                val current = window == nearWindow && hand.left == nearLeft
+                Matrix.setRotateM(rotate, 0, -window.yaw, 0f, 1f, 0f)
+                Matrix.multiplyMV(local, 0, rotate, 0, tip, 0)
+                // The window's plane is z = -radius in its own frame, facing the room's middle.
+                val d = local[2] + windowRadius
+                val x = local[0]
+                val y = local[1] - window.height
+                val margin = if (current) NEAR_MARGIN_OUT else NEAR_MARGIN_IN
+                if (d > (if (current) NEAR_EXIT else NEAR_DISTANCE) || d < -NEAR_BEHIND) continue
+                if (abs(x) > window.width / 2 + margin || abs(y) > window.heightM / 2 + margin) continue
+                val u = (x + window.width / 2) / window.width
+                val v = (window.heightM / 2 - y) / window.heightM
+                val candidate = Near(hand.left, window, d, u, v, tip)
+                val held = best?.let { it.window == nearWindow && it.left == nearLeft } == true
+                if (best == null || current || !held && abs(d) < abs(best.d)) best = candidate
+            }
+        }
+        val near = best
+        if (near == null) {
+            endTouch()
+            return false
+        }
+        if (near.window != nearWindow || near.left != nearLeft) {
+            // Entering NEAR: the pointer's press (if any) ends, then the finger takes over.
+            endTouch()
+            if (pinch.pinching) pinch.reset()
+            release()
+            nearWindow = near.window
+            nearLeft = near.left
+            nearD = near.d; nearU = near.u; nearV = near.v
+        } else {
+            nearD += (near.d - nearD) * TOUCH_SMOOTHING
+            nearU += (near.u - nearU) * TOUCH_SMOOTHING
+            nearV += (near.v - nearV) * TOUCH_SMOOTHING
+        }
+        val window = near.window
+        val inside = nearU in 0f..1f && nearV in 0f..1f
+        val u = nearU.coerceIn(0f, 1f); val v = nearV.coerceIn(0f, 1f)
+        if (!touching && inside && nearD <= TOUCH_IN && previousNearD > TOUCH_IN) {
+            touching = true
+            focused = window
+            window.content.touch(MotionEvent.ACTION_DOWN, u, v)
+        } else if (touching && (nearD >= TOUCH_OUT || !inside)) {
+            window.content.touch(MotionEvent.ACTION_UP, u, v)
+            touching = false
+        } else if (touching) {
+            window.content.touch(MotionEvent.ACTION_MOVE, u, v)
+        }
+        previousNearD = nearD
+        // No pointer: only a ring on the window where the finger is over it, smaller while touching.
+        ray = null
+        pinchPoint = null
+        updateHit(null)
+        Matrix.setRotateM(rotate, 0, window.yaw, 0f, 1f, 0f)
+        val normal = FloatArray(4)
+        Matrix.multiplyMV(normal, 0, rotate, 0, floatArrayOf(0f, 0f, 1f, 0f), 0)
+        val onPlane = floatArrayOf(
+            near.tip[0] - normal[0] * near.d - position[0],
+            near.tip[1] - normal[1] * near.d - position[1],
+            near.tip[2] - normal[2] * near.d - position[2], 0f,
+        )
+        val toHead = FloatArray(16)
+        Matrix.transposeM(toHead, 0, head, 0)
+        val h = FloatArray(4)
+        Matrix.multiplyMV(h, 0, toHead, 0, onPlane, 0)
+        // Start at 0: drawBeam draws no drop and no ray then, only the ring.
+        beam = if (h[2] < -.05f) floatArrayOf(0f, 0f, 0f, h[0], h[1], h[2], 1f) else null
+        otherBeam = null
+        return true
+    }
+
+    private var previousNearD = 1f
+
+    /** Leaves NEAR: a touch still down is lifted (ACTION_UP), and the pointer may come back. */
+    private fun endTouch() {
+        val window = nearWindow
+        if (touching && window != null) window.content.touch(MotionEvent.ACTION_UP, nearU.coerceIn(0f, 1f), nearV.coerceIn(0f, 1f))
+        touching = false
+        nearWindow = null
+        previousNearD = 1f
+    }
+
+    /**
+     * The hand's ray for drawing, in head space: where it leaves the hand (x, y, z), where it ends
+     * (x, y, z), and 1 when it ends on something. Null without a pointing hand.
+     */
+    @Volatile private var beam: FloatArray? = null
+    /** The other hand's cursor (it points, but only the clicking hand presses). */
+    @Volatile private var otherBeam: FloatArray? = null
+    private var otherLeft: Boolean? = null
+    private val otherFilterX = HandGestures.OneEuro(minCutoff = .9f, beta = 3f, deadZone = .0015f)
+    private val otherFilterY = HandGestures.OneEuro(minCutoff = .9f, beta = 3f, deadZone = .0015f)
+
+    /** A beam from the hand at ([hx], [hy]) along the tangent ([tx], [ty]) to what it meets. */
+    private fun beamFor(hx: Float, hy: Float, tx: Float, ty: Float, target: Hit?): FloatArray {
+        val far = when (target) { null -> 1.2f; is Hit.Panel, is Hit.Setup -> panelRadius; else -> windowRadius }
+        val length = kotlin.math.sqrt(tx * tx + ty * ty + 1f)
+        return floatArrayOf(hx, hy, -1f, tx / length * far, ty / length * far, -1f / length * far, if (target != null) 1f else 0f)
+    }
+
+    /**
+     * How far the home, the windows and the keyboard stand. In 6DoF the eye's view is the camera's,
+     * narrower than the 90° of 3DoF, so the same distance looks much nearer there: 6DoF puts things
+     * a little further away and 3DoF a little nearer, and both look the same, in between.
+     */
+    private val distanceScale get() = if (ar != null) SIX_DOF_DISTANCE else THREE_DOF_DISTANCE
+    private val windowRadius get() = VrWindow.RADIUS * distanceScale
+    private val panelRadius get() = PANEL_RADIUS * distanceScale
+    private val keyboardRadius get() = KEYBOARD_RADIUS * distanceScale
+
+    /** A direction in head space as tangents (x, y at one metre ahead), turned into the room. */
+    private fun tangentRay(x: Float, y: Float, frameNs: Long): FloatArray {
+        val head = FloatArray(16)
+        tracker.copyHeadAt(frameNs, head)
+        val world = FloatArray(4)
+        Matrix.multiplyMV(world, 0, head, 0, floatArrayOf(x, y, -1f, 0f), 0)
+        return world
+    }
+
+    private val handSmoothers = HashMap<String, LandmarkSmoother>()
+
+    /** One Euro filters for the 21 points of one hand (x and y on the view, z relative depth). */
+    private class LandmarkSmoother {
+        private val filters = Array(21 * 3) { i ->
+            if (i % 3 == 2) HandGestures.OneEuro(minCutoff = .8f, beta = 1.2f)
+            else HandGestures.OneEuro(minCutoff = 1.4f, beta = 12f, deadZone = .0008f)
+        }
+
+        fun smooth(points: List<NormalizedLandmark>, timeNs: Long): List<NormalizedLandmark> = points.mapIndexed { i, p ->
+            if (i >= 21) p
+            else NormalizedLandmark.create(
+                filters[i * 3].filter(p.x(), timeNs),
+                filters[i * 3 + 1].filter(p.y(), timeNs),
+                filters[i * 3 + 2].filter(p.z(), timeNs),
+            )
+        }
+    }
+
+    private class SeenHand(val left: Boolean, val shape: HandGestures.Shape, val depth: Float, val head: FloatArray? = null)
+
+    private fun immersiveInput(window: VrWindow, seen: List<SeenHand>, now: Long) {
+        updateHit(null)
+        ray = null
+        // The hands themselves, in 3D, for pages that play with them.
+        val json = org.json.JSONArray()
+        seen.forEach { hand ->
+            val points = hand.head ?: return@forEach
+            val p = org.json.JSONArray()
+            points.forEach { p.put(Math.round(it * 10000) / 10000.0) }
+            json.put(org.json.JSONObject().put("left", hand.left).put("p", p)
+                .put("pinch", hand.shape.pinchGap < .3f).put("grab", hand.shape.fist))
+        }
+        window.content.hands(org.json.JSONObject().put("hands", json).toString())
+        // A pinch is WebXR "select".
+        val hand = seen.firstOrNull { it.shape.pinchGap < .3f }?.shape ?: seen.maxByOrNull { it.shape.palmWidth }?.shape
+        val was = pinch.pinching
+        val pinching = hand != null && pinch.update(hand)
+        if (hand == null) pinch.reset()
+        // Palm toward the face and a pinch leaves the immersive page.
+        if (pinching && !was && hand?.palmToFace == true) { window.content.exitImmersive(); return }
+        if (pinching && !was) window.content.touch(MotionEvent.ACTION_DOWN, .5f, .5f)
+        if (!pinching && was) window.content.touch(MotionEvent.ACTION_UP, .5f, .5f)
+    }
+
+    /** Window held by a fist, and which hand holds it. */
+    private var grab: Drag? = null
+    private var grabLeft: Boolean? = null
+    private val grabX = HandGestures.OneEuro(minCutoff = .6f, beta = 1f)
+    private val grabY = HandGestures.OneEuro(minCutoff = .6f, beta = 1f)
+
+    private fun grabWindows(seen: List<SeenHand>, frameNs: Long) {
+        val now = SystemClock.elapsedRealtimeNanos()
+        val holding = grab
+        if (holding != null) {
+            val hand = seen.firstOrNull { it.left == grabLeft }
+            if (hand == null || !hand.shape.fist) {
+                grab = null; grabLeft = null
+                redraw.set(true)
+                return
+            }
+            val direction = pointerRay(grabX.filter(hand.shape.palmX, now), grabY.filter(hand.shape.palmY, now), frameNs)
+            holding.window.yaw = holding.startYaw + (yawOf(direction) - holding.pointerYaw)
+            holding.window.height = holding.startHeight + (heightAt(direction, windowRadius) - holding.pointerHeight)
             return
         }
-        val pinching = pinchLatch.update(hand)
-        // A nearby extended index finger behaves like touching a tablet. This is deliberately
-        // limited to app content: system bars and window furniture still require a pinch.
-        val directReady = !pinching && hand.indexExtended && hand.palmWidth >= DIRECT_TOUCH_PALM
-        if (directReady || directTouching) {
-            direction = pointerRay(hand.indexX, hand.indexY, frameNs)
-            ray = direction
-            val directTarget = hitTest(direction)
-            updateHit(directTarget)
-            if (directReady && !directTouching && directTarget is Hit.Content) {
-                directTouching = true
-                press(directTarget, direction)
-                return
-            }
-            if (directReady && directTouching) {
-                dragOrMove(direction)
-                return
-            }
-            if (!directReady && directTouching) {
-                directTouching = false
-                release()
-                return
+        // An open hand near a window's edge lights its frame: a fist there takes it.
+        grabHover = seen.firstOrNull { !it.shape.fist }?.let { hand ->
+            val direction = pointerRay(hand.shape.palmX, hand.shape.palmY, frameNs)
+            sideHit(direction)?.takeIf { window ->
+                val local = toLocal(direction, window.yaw, windowRadius) ?: return@takeIf false
+                val x = abs(local[0]); val y = local[1] - window.height
+                x > window.width / 2 - SIDE_INSIDE || y > window.heightM / 2 - SIDE_INSIDE || y < -window.heightM / 2 + SIDE_INSIDE
             }
         }
-        if (pinching && !wasPinching) {
-            wasPinching = true
-            if (hand.palmToFace && onboarding == null) {
-                openHandMenu(chosen.first)
-            } else if (boundary.tracing != null) {
-                if (boundary.finish()) toast("Граница сохранена") else toast("Граница слишком маленькая — обойдите комнату")
-            } else {
-                press(target, direction)
-            }
-        } else if (pinching) {
-            checkLongPress()
-            dragOrMove(direction)
-        } else if (wasPinching) {
-            wasPinching = false
-            release()
-        }
-    }
-
-    private fun onJoyCon(snapshot: JoyConBridge.Snapshot) {
-        if (!controllersClick()) return
-        val buttons = snapshot.left.buttons or snapshot.right.buttons
-        val down = buttons and (JoyConButtons.TRIGGER or JoyConButtons.PRIMARY) != 0
-        if (down && !joyConDown) press(hit, ray)
-        if (down) checkLongPress()
-        if (!down && joyConDown) release()
-        joyConDown = down
-        if (buttons and JoyConButtons.MENU != 0) openMenu()
-        val stick = if (abs(snapshot.right.stickX) > abs(snapshot.left.stickX)) snapshot.right.stickX else snapshot.left.stickX
-        if (abs(stick) > .7f && SystemClock.uptimeMillis() > stickHeldUntil) {
-            stickHeldUntil = SystemClock.uptimeMillis() + 450
-            synchronized(panel) { panel.turnPage(if (stick > 0) 1 else -1) }
+        // A fist that just closed on a window takes that window.
+        for (hand in seen) {
+            val closed = hand.shape.fist
+            val before = fistBefore[hand.left] == true
+            fistBefore[hand.left] = closed
+            if (!closed || before) continue
+            grabX.reset(); grabY.reset()
+            val direction = pointerRay(grabX.filter(hand.shape.palmX, now), grabY.filter(hand.shape.palmY, now), frameNs)
+            val side = sideHit(direction)
+            if (side == null) continue
+            if (pinch.pinching && activeLeft == hand.left) { pinch.reset(); release() }
+            focused = side
+            grab = Drag(side, side.yaw, side.height, yawOf(direction), heightAt(direction, windowRadius))
+            grabLeft = hand.left
             redraw.set(true)
+            return
         }
     }
 
-    /** The fingers' pinch point seen from the eyes, as a world direction. */
+    private val fistBefore = HashMap<Boolean, Boolean>()
+
+    /** The window under an open hand's palm near its edge: its white frame shows it can be taken. */
+    @Volatile private var grabHover: VrWindow? = null
+
+    /** The window under the palm (with a margin around it), for a fist to take. */
+    private fun sideHit(direction: FloatArray): VrWindow? {
+        val ordered = windows.filter { !it.minimized && !it.content.immersive }.sortedByDescending { it == focused }
+        for (window in ordered) {
+            val local = toLocal(direction, window.yaw, windowRadius) ?: continue
+            val x = abs(local[0])
+            val y = local[1] - window.height
+            val w = window.width / 2
+            // The whole window and a margin around it: a fist anywhere on it takes it.
+            if (x < w + SIDE_OUTSIDE && y < window.heightM / 2 + barHeight(window) + .08f && y > frameBottom(window) - .06f) return window
+        }
+        return null
+    }
+
+    /** A point of the camera picture (the fingertip) seen from the eyes, as a world direction. */
     private fun pointerRay(x: Float, y: Float, frameNs: Long): FloatArray {
         val head = FloatArray(16)
         tracker.copyHeadAt(frameNs, head)
@@ -946,15 +1431,33 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     private fun hitTest(direction: FloatArray?): Hit? {
         direction ?: return null
         if (onboarding != null) {
-            val local = toLocal(direction, panelYaw, PANEL_RADIUS) ?: return null
+            val local = toLocal(direction, panelYaw, panelRadius) ?: return null
             val height = PANEL_WIDTH * Onboarding.HEIGHT / Onboarding.WIDTH
             val u = (local[0] + PANEL_WIDTH / 2) / PANEL_WIDTH
             val v = (height / 2 - local[1]) / height
             return if (u in 0f..1f && v in 0f..1f) Hit.Setup(u, v) else null
         }
-        // The keyboard floats closest to the user.
+        // On the table: where the ray meets the table top, in the keyboard's own frame.
         keyboardWindow()?.let { window ->
-            val local = toLocal(direction, window.yaw, KEYBOARD_RADIUS)
+            val place = tableKeyboard(window) ?: return@let
+            val head = synchronized(headPosition) { headPosition.copyOf() }
+            if (direction[1] >= -1e-3f) return@let
+            val t = (place[1] - head[1]) / direction[1]
+            if (t <= 0f) return@let
+            val dx = head[0] + direction[0] * t - place[0]
+            val dz = head[2] + direction[2] * t - place[2]
+            val yaw = Math.toRadians(place[3].toDouble()).toFloat()
+            val c = kotlin.math.cos(yaw); val sn = kotlin.math.sin(yaw)
+            val lx = dx * c - dz * sn
+            val ly = -(dx * sn + dz * c)
+            val u = (lx + TABLE_KEYBOARD_W / 2) / TABLE_KEYBOARD_W
+            val v = (TABLE_KEYBOARD_H / 2 - ly) / TABLE_KEYBOARD_H
+            if (u in 0f..1f && v in 0f..1f) return Hit.Keyboard(window, u, v)
+            return@let
+        }
+        // The keyboard floats closest to the user.
+        keyboardWindow()?.takeIf { tableKeyboard(it) == null }?.let { window ->
+            val local = toLocal(direction, window.yaw, keyboardRadius)
             if (local != null) {
                 val u = (local[0] + KEYBOARD_W / 2) / KEYBOARD_W
                 val v = (keyboardCenterY(window) + KEYBOARD_H / 2 - local[1]) / KEYBOARD_H
@@ -965,19 +1468,31 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         val ordered = windows.filter { !it.minimized }.sortedByDescending { it == focused }
         for (window in ordered) {
             if (window.arcDegrees > 0f) curvedContentHit(direction, window)?.let { return it }
-            val local = toLocal(direction, window.yaw, VrWindow.RADIUS) ?: continue
+            val local = toLocal(direction, window.yaw, windowRadius) ?: continue
             val x = local[0]
             val y = local[1] - window.height
             val w = window.width / 2
             val h = window.heightM / 2
-            // Corner handle: drag to resize.
-            if (x > w - .05f && x < w + .09f && y < -h + .05f && y > -h - .09f && !(abs(x) <= w - .06f)) return Hit.Resize(window)
             if (abs(x) <= w && abs(y) <= h) return Hit.Content(window, (x + w) / window.width, (h - y) / window.heightM)
-            if (window.content.toolbarTitle() != null && abs(y - (h + TOOLBAR_GAP + TOOLBAR_H / 2)) < TOOLBAR_H / 2 && abs(x) < TOOLBAR_W / 2) {
-                return Hit.Toolbar(window, (x + TOOLBAR_W / 2) / TOOLBAR_W)
+            // The browser's bar on top.
+            val bar = barHeight(window)
+            if (bar > 0f && y > h && y <= h + bar && abs(x) <= w) return Hit.Toolbar(window, (x + w) / window.width, (h + bar - y) / bar)
+            // The pill under the window: back, the title (drag to move), keyboard, expand, minimize, close.
+            val pill = WindowChrome.pillWidth(window.width)
+            val pillTop = -h - WindowChrome.PILL_GAP
+            if (y <= pillTop + .01f && y >= pillTop - WindowChrome.PILL_H - .01f && abs(x) <= pill / 2) {
+                return when (WindowChrome.pillAction((x + pill / 2) / pill, pill, pillBack(window))) {
+                    "close" -> Hit.Close(window)
+                    "back" -> Hit.Toolbar(window, -1f, -1f)
+                    "minimize" -> Hit.Minimize(window)
+                    "expand" -> Hit.Expand(window)
+                    "curve" -> Hit.Curve(window)
+                    "keyboard" -> Hit.KeyboardButton(window)
+                    else -> Hit.Bar(window)
+                }
             }
-            val barY = -h - BAR_OFFSET
-            val desktopY = barY - .15f
+            val handleY = frameBottom(window) - WindowChrome.HANDLE_GAP
+            val desktopY = handleY - .12f
             if (window.id == "desktop" && abs(y - desktopY) < .075f && abs(x) < .57f) {
                 return when {
                     x < -.18f -> Hit.DesktopWidth(window, wider = false)
@@ -985,15 +1500,9 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                     else -> Hit.DesktopCurve(window)
                 }
             }
-            if (abs(y - barY) < .05f) {
-                if (abs(x) < .22f) return Hit.Bar(window)
-                if (abs(x + BUTTON_X) < .05f) return Hit.Minimize(window)
-                if (abs(x - BUTTON_X) < .05f) return Hit.Close(window)
-                if (abs(x + BUTTON_X + KEYBOARD_BUTTON_GAP) < .05f) return Hit.KeyboardButton(window)
-            }
         }
         if (!panelVisible) return null
-        val local = toLocal(direction, panelYaw, PANEL_RADIUS) ?: return null
+        val local = toLocal(direction, panelYaw, panelRadius) ?: return null
         val u = (local[0] + PANEL_WIDTH / 2) / PANEL_WIDTH
         val v = (PANEL_HEIGHT / 2 - local[1]) / PANEL_HEIGHT
         return if (u in 0f..1f && v in 0f..1f) Hit.Panel(u, v) else null
@@ -1007,7 +1516,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         val o = FloatArray(4); Matrix.multiplyMV(o, 0, rotate, 0, origin, 0)
         val a = d[0] * d[0] + d[2] * d[2]
         val b = 2f * (o[0] * d[0] + o[2] * d[2])
-        val c = o[0] * o[0] + o[2] * o[2] - VrWindow.RADIUS * VrWindow.RADIUS
+        val c = o[0] * o[0] + o[2] * o[2] - windowRadius * windowRadius
         val disc = b * b - 4f * a * c
         if (a < 1e-5f || disc < 0f) return null
         val roots = floatArrayOf((-b - kotlin.math.sqrt(disc)) / (2f * a), (-b + kotlin.math.sqrt(disc)) / (2f * a))
@@ -1017,6 +1526,30 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         val angle = kotlin.math.atan2(x, -z)
         if (kotlin.math.abs(angle) > span / 2 || kotlin.math.abs(y) > window.heightM / 2) return null
         return Hit.Content(window, angle / span + .5f, (.5f - y / window.heightM).coerceIn(0f, 1f))
+    }
+
+    /**
+     * The keyboard on the table: x, y, z of its centre and its yaw in degrees — in front of the
+     * user towards [window], kept on the table top. Null without 6DoF or a table within reach.
+     */
+    private fun tableKeyboard(window: VrWindow): FloatArray? {
+        if (ar == null) return null
+        val table = RoomScan.table ?: return null
+        val head = synchronized(headPosition) { headPosition.copyOf() }
+        val yaw = Math.toRadians(window.yaw.toDouble()).toFloat()
+        var x = head[0] - kotlin.math.sin(yaw) * .42f
+        var z = head[2] - kotlin.math.cos(yaw) * .42f
+        // Onto the table: into its frame, clamp, back.
+        val ax = kotlin.math.cos(table.yaw); val az = -kotlin.math.sin(table.yaw)
+        val bx = kotlin.math.sin(table.yaw); val bz = kotlin.math.cos(table.yaw)
+        val vx = x - table.x; val vz = z - table.z
+        val along = (vx * ax + vz * az).coerceIn(-maxOf(0f, table.halfX - .12f), maxOf(0f, table.halfX - .12f))
+        val across = (vx * bx + vz * bz).coerceIn(-maxOf(0f, table.halfZ - .08f), maxOf(0f, table.halfZ - .08f))
+        x = table.x + along * ax + across * bx
+        z = table.z + along * az + across * bz
+        // Only a table the user sits or stands at.
+        if (kotlin.math.hypot(x - head[0], z - head[2]) > 1.1f) return null
+        return floatArrayOf(x, table.y + .006f, z, window.yaw)
     }
 
     /** Where a ray from the eyes crosses the plane of a window at [yaw] and [radius], in that window's frame. */
@@ -1036,6 +1569,10 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     }
 
     private fun updateHit(target: Hit?) {
+        // Watching together: the other side sees where we point on the shared page.
+        if (target is Hit.Content && target.window.id == SHARED_WINDOW) {
+            (target.window.content as? SharedContent)?.pointer(target.u, target.v)
+        }
         if (target is Hit.Setup) onboarding?.hover(target.u, target.v)
         val key = (target as? Hit.Keyboard)?.let { keyboard.hovered(it.u, it.v) }
         if (key != hoveredKey) {
@@ -1061,7 +1598,13 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             is Hit.Setup -> onboarding?.press(target.u, target.v)
             is Hit.Panel -> {
                 val item = synchronized(panel) { panel.hit(target.u, target.v) }
-                // Home icons open when the pinch lets go; holding it opens "Customize" instead.
+                // A room slider follows the pointer while pinched.
+                if (item is HomePanel.Target.Slider) {
+                    sliderDrag = item.slider
+                    moveSlider(item.slider, target.u, target.v)
+                    return
+                }
+                // Home icons open when the finger lets go (a swipe turns the page instead).
                 if (panel.mode == HomePanel.Mode.HOME || panel.mode == HomePanel.Mode.LIBRARY) {
                     panelPress = item
                     panelPressAt = SystemClock.elapsedRealtime()
@@ -1077,18 +1620,22 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             }
             is Hit.Bar -> if (direction != null) {
                 focused = target.window
-                drag = Drag(target.window, target.window.yaw, target.window.height, yawOf(direction), heightAt(direction, VrWindow.RADIUS))
+                drag = Drag(target.window, target.window.yaw, target.window.height, yawOf(direction), heightAt(direction, windowRadius))
             }
             is Hit.Toolbar -> {
                 focused = target.window
-                target.window.content.toolbarAction(
-                    when {
-                        target.u < TOOLBAR_BUTTON -> "back"
-                        target.u < TOOLBAR_BUTTON * 2 -> "forward"
-                        target.u > 1 - TOOLBAR_BUTTON -> "reload"
-                        else -> "home"
+                // u < 0: the back button of a bottom bar; otherwise a place on the browser's bar.
+                val action = if (target.u < 0f) "back" else WindowChrome.barAction(target.u, target.v, target.window.content.toolbarTabs().size)
+                when (action) {
+                    null -> Unit
+                    "minimize" -> runOnUiThread { minimize(target.window) }
+                    "close" -> runOnUiThread { close(target.window) }
+                    // The empty parts of the bar move the window, like its handle.
+                    "move" -> if (direction != null) {
+                        drag = Drag(target.window, target.window.yaw, target.window.height, yawOf(direction), heightAt(direction, windowRadius))
                     }
-                )
+                    else -> target.window.content.toolbarAction(action)
+                }
             }
             is Hit.Resize -> if (direction != null) {
                 focused = target.window
@@ -1125,12 +1672,27 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             }
             is Hit.Minimize -> runOnUiThread { minimize(target.window) }
             is Hit.Close -> runOnUiThread { close(target.window) }
+            is Hit.Curve -> {
+                // Bent around the user at the windows' own distance, keeping its width; or flat.
+                target.window.arcDegrees = if (target.window.arcDegrees > 0f) 0f
+                    else Math.toDegrees((VrWindow.WIDTH_M / windowRadius).toDouble()).toFloat()
+            }
+            is Hit.Expand -> {
+                focused = target.window
+                val scale = if (expanded(target.window)) 1f else EXPANDED_SCALE
+                target.window.widthScale = scale
+                target.window.heightScale = scale
+            }
             null -> Unit
         }
     }
 
     private fun dragOrMove(direction: FloatArray) {
         if (!pressing) return
+        sliderDrag?.let { slider ->
+            (hit as? Hit.Panel)?.let { moveSlider(slider, it.u, it.v) }
+            return
+        }
         val panelStart = pressedHit as? Hit.Panel
         val panelNow = hit as? Hit.Panel
         if (panelStart != null) {
@@ -1144,7 +1706,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         drag?.let { d ->
             if (d.resize) {
                 // The window keeps its centre; the corner follows the pointer.
-                val local = toLocal(direction, d.window.yaw, VrWindow.RADIUS) ?: return
+                val local = toLocal(direction, d.window.yaw, windowRadius) ?: return
                 val byWidth = 2 * kotlin.math.abs(local[0]) / VrWindow.WIDTH_M
                 val aspect = d.window.content.pixelHeight.toFloat() / d.window.content.pixelWidth
                 val byHeight = 2 * kotlin.math.abs(d.window.height - local[1]) / (VrWindow.WIDTH_M * aspect)
@@ -1153,14 +1715,14 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                 return
             }
             d.window.yaw = d.startYaw + (yawOf(direction) - d.pointerYaw)
-            d.window.height = d.startHeight + (heightAt(direction, VrWindow.RADIUS) - d.pointerHeight)
+            d.window.height = d.startHeight + (heightAt(direction, windowRadius) - d.pointerHeight)
             return
         }
         val pressed = pressedHit as? Hit.Content ?: return
         val now = SystemClock.uptimeMillis()
         if (now - lastMoveSent < 16) return
         lastMoveSent = now
-        val local = toLocal(direction, pressed.window.yaw, VrWindow.RADIUS) ?: return
+        val local = toLocal(direction, pressed.window.yaw, windowRadius) ?: return
         val w = pressed.window.width / 2
         val h = pressed.window.heightM / 2
         val u = ((local[0] + w) / pressed.window.width).coerceIn(0f, 1f)
@@ -1170,25 +1732,83 @@ class VrHomeActivity : Activity(), LifecycleOwner {
 
     private fun panelAction(item: HomePanel.Target) {
         when (item) {
-            is HomePanel.Target.App -> openEntry(item.entry)
+            is HomePanel.Target.App -> {
+                synchronized(panel) {
+                    if (item.entry.id.startsWith("app:") || item.entry.id.startsWith("web:") || item.entry.id.startsWith("own:") || item.entry.id == ID_DESKTOP) {
+                        panel.opened(item.entry.id)
+                    }
+                    panel.closeSearch()
+                }
+                openEntry(item.entry)
+            }
             is HomePanel.Target.Page -> synchronized(panel) { panel.showPage(item.index) }
-            HomePanel.Target.Library -> switchMode(HomePanel.Mode.LIBRARY)
-            is HomePanel.Target.Theme -> {
-                IconPack.setTheme(this, if (item.dark) IconPack.Theme.DARK else IconPack.Theme.LIGHT)
-                openCustomize()
-                loadApps()
+            // The library button: opens the Library, or closes it back to the dock.
+            HomePanel.Target.Library -> synchronized(panel) {
+                val open = panel.library() && !panel.searching && (panel.mode == HomePanel.Mode.HOME || panel.mode == HomePanel.Mode.LIBRARY)
+                if (open && panel.compact) switchMode(HomePanel.Mode.HOME)
+                else { switchMode(HomePanel.Mode.LIBRARY); panel.setTab(HomePanel.Tab.ALL) }
+            }
+            HomePanel.Target.Store -> switchMode(HomePanel.Mode.STORE)
+            HomePanel.Target.Sort -> synchronized(panel) { panel.toggleSort() }
+            // Sliders move while pinched (see press and dragOrMove), nothing to do on release.
+            is HomePanel.Target.Slider -> Unit
+            HomePanel.Target.Card -> Unit
+            is HomePanel.Target.Quick -> quickAction(item.quick)
+            is HomePanel.Target.Key -> {
+                val open = synchronized(panel) { panel.type(item.key) }
+                if (open != null) panelAction(HomePanel.Target.App(open))
+            }
+            is HomePanel.Target.Control -> when (item.control) {
+                HomePanel.Control.PROFILE -> openOwn(ID_SETTINGS)
+                // The time opens quick settings, as on Quest (and closes them again).
+                HomePanel.Control.STATUS -> switchMode(if (panel.mode == HomePanel.Mode.QUICK) HomePanel.Mode.HOME else HomePanel.Mode.QUICK)
+                HomePanel.Control.NOTIFICATIONS -> openCalls()
+                HomePanel.Control.SEARCH -> synchronized(panel) { if (panel.searching) panel.closeSearch() else panel.openSearch() }
+                HomePanel.Control.PASSTHROUGH -> {
+                    // Like the Horizon button: the room through the camera, or back to the chosen world.
+                    val world = if (environmentId == Environments.REAL_WORLD) lastWorld else Environments.REAL_WORLD
+                    setEnvironment(world)
+                }
             }
             HomePanel.Target.Close -> switchMode(HomePanel.Mode.HOME)
             is HomePanel.Target.Rail -> {
-                synchronized(panel) { panel.setTab(item.tab) }
+                synchronized(panel) {
+                    if (panel.mode != HomePanel.Mode.LIBRARY && panel.mode != HomePanel.Mode.HOME) panel.mode = HomePanel.Mode.LIBRARY
+                    if (panel.mode == HomePanel.Mode.HOME && panel.compact) panel.mode = HomePanel.Mode.LIBRARY
+                    panel.closeSearch()
+                    panel.setTab(item.tab)
+                }
                 redraw.set(true)
                 when (item.tab) {
                     HomePanel.Tab.PEOPLE -> loadPeople()
                     HomePanel.Tab.ENVIRONMENTS -> loadEnvironments()
-                    HomePanel.Tab.APPS -> Unit
+                    else -> Unit
                 }
             }
         }
+    }
+
+    private fun quickAction(item: HomePanel.Quick) {
+        when (item) {
+            HomePanel.Quick.SETTINGS, HomePanel.Quick.WIFI -> { switchMode(HomePanel.Mode.HOME); openOwn(ID_SETTINGS) }
+            HomePanel.Quick.CAR -> setCarMode(!carMode)
+            HomePanel.Quick.DESKTOP -> { switchMode(HomePanel.Mode.HOME); openOwn(ID_DESKTOP) }
+            HomePanel.Quick.PASSTHROUGH -> setEnvironment(if (environmentId == Environments.REAL_WORLD) lastWorld else Environments.REAL_WORLD)
+            HomePanel.Quick.RECENTER -> recenter()
+            HomePanel.Quick.BLUETOOTH -> { switchMode(HomePanel.Mode.HOME); openOwn(ID_SETTINGS) }
+            HomePanel.Quick.DND -> synchronized(panel) {
+                panel.dnd = !panel.dnd
+                panel.alerts = if (panel.dnd) 0 else Calls.online.size
+            }
+            HomePanel.Quick.PHOTO -> takePhoto()
+        }
+        redraw.set(true)
+    }
+
+    /** Opens one of PhoneXR's own apps from the home by its id. */
+    private fun openOwn(id: String) {
+        val entry = synchronized(panel) { panel.homeEntries() }.firstOrNull { it.id == id } ?: HomePanel.Entry(id, "", null)
+        openEntry(entry)
     }
 
     /** Friends on the "people" tab: tapping one opens the calls window. */
@@ -1229,8 +1849,69 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     /** Which place is around the user; [Environments.REAL_WORLD] is the room through the camera. */
     @Volatile private var environmentId = Environments.REAL_WORLD
 
+    // ------------------------------------------------------------------ Room: volume, brightness, rain, fog
+
+    @Volatile private var sliderDrag: HomePanel.Slider? = null
+    /** How bright the room (passthrough or world) is, 0..1. */
+    @Volatile private var roomBrightness = 1f
+    @Volatile private var rainLevel = 0f
+    @Volatile private var fogLevel = 0f
+
+    private fun audio() = getSystemService(android.media.AudioManager::class.java)
+
+    /** The saved room and the phone's media volume, onto the sliders. */
+    private fun loadRoom() {
+        val prefs = getSharedPreferences(ROOM_PREFS, MODE_PRIVATE)
+        val brightness = prefs.getFloat("brightness", 1f)
+        roomBrightness = .15f + .85f * brightness
+        rainLevel = prefs.getFloat("rain", 0f).takeIf { it >= OFF_BELOW } ?: 0f
+        fogLevel = prefs.getFloat("fog", 0f).takeIf { it >= OFF_BELOW } ?: 0f
+        val volume = runCatching {
+            val audio = audio()
+            audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC).toFloat() /
+                audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        }.getOrDefault(.5f)
+        synchronized(panel) {
+            panel.sliders[HomePanel.Slider.VOLUME.ordinal] = volume
+            panel.sliders[HomePanel.Slider.BRIGHTNESS.ordinal] = brightness
+            panel.sliders[HomePanel.Slider.RAIN.ordinal] = rainLevel
+            panel.sliders[HomePanel.Slider.FOG.ordinal] = fogLevel
+        }
+    }
+
+    private fun saveRoom() {
+        getSharedPreferences(ROOM_PREFS, MODE_PRIVATE).edit()
+            .putFloat("brightness", synchronized(panel) { panel.sliders[HomePanel.Slider.BRIGHTNESS.ordinal] }).putFloat("rain", rainLevel).putFloat("fog", fogLevel).apply()
+    }
+
+    private fun moveSlider(slider: HomePanel.Slider, u: Float, v: Float) {
+        val value = synchronized(panel) { panel.sliderValue(slider, u, v).also { panel.sliders[slider.ordinal] = it } }
+        when (slider) {
+            HomePanel.Slider.VOLUME -> runCatching {
+                val audio = audio()
+                val max = audio.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                val index = kotlin.math.round(value * max).toInt()
+                if (index != audio.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)) {
+                    audio.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, index, 0)
+                }
+            }
+            // Never quite black: the room stays findable.
+            HomePanel.Slider.BRIGHTNESS -> roomBrightness = .15f + .85f * value
+            // The bottom of the slider is really off: a slider left a hair above zero rained anyway.
+            HomePanel.Slider.RAIN -> rainLevel = if (value < OFF_BELOW) 0f else value
+            HomePanel.Slider.FOG -> fogLevel = if (value < OFF_BELOW) 0f else value
+        }
+        redraw.set(true)
+    }
+
+    /** The world the passthrough button goes back to. */
+    private var lastWorld = Environments.BUILT_IN.first { it.id != Environments.REAL_WORLD }.id
+
     private fun setEnvironment(id: String) {
         environmentId = id
+        if (id != Environments.REAL_WORLD) lastWorld = id
+        synchronized(panel) { panel.passthrough = id == Environments.REAL_WORLD }
+        redraw.set(true)
         thread(name = "PhoneXR environment") {
             val bitmap = runCatching { Environments.panorama(this, id) }.getOrNull()
             // The picture goes to the GPU on the drawing thread, where textures may be touched.
@@ -1239,37 +1920,17 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         }
     }
 
-    /** A pinch held on the home: pick light or dark PhoneXR icons. */
-    private fun openCustomize() {
-        synchronized(panel) {
-            panel.setCustomize(
-                IconPack.icon(this, "com.miui.weather2", IconPack.Theme.LIGHT),
-                IconPack.icon(this, "com.miui.weather2", IconPack.Theme.DARK),
-                IconPack.theme(this) == IconPack.Theme.DARK,
-            )
-            panel.mode = HomePanel.Mode.CUSTOMIZE
-        }
-        redraw.set(true)
-    }
-
     @Volatile private var panelPress: HomePanel.Target? = null
     @Volatile private var panelPressAt = 0L
-
-    /** While pinching on the home: long enough opens "Customize". */
-    private fun checkLongPress() {
-        if (!pressing || panelPressAt == 0L) return
-        if (panel.mode != HomePanel.Mode.HOME || panelPressMoved) return
-        if (SystemClock.elapsedRealtime() - panelPressAt > LONG_PRESS_MS) {
-            panelPressAt = 0L
-            panelPress = null
-            runOnUiThread { openCustomize() }
-        }
-    }
 
     private fun release() {
         if (!pressing) return
         pressing = false
         drag = null
+        if (sliderDrag != null) {
+            sliderDrag = null
+            saveRoom()
+        }
         val panelStart = pressedHit as? Hit.Panel
         val panelEnd = hit as? Hit.Panel
         val swipe = if (panelPressMoved && panelStart != null && panelEnd != null) panelEnd.u - panelStart.u else 0f
@@ -1296,6 +1957,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     // ------------------------------------------------------------------ Gamepad goes to the focused window
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (physicalKeyboard(event)) return typeKey(event)
         if (!event.isFromSource(InputDevice.SOURCE_GAMEPAD) && !event.isFromSource(InputDevice.SOURCE_DPAD)) {
             return super.dispatchKeyEvent(event)
         }
@@ -1317,12 +1979,162 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     }
 
     override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
+            // The first touch of a mouse takes it over: relative movement, no system pointer.
+            if (!surfaceView.hasPointerCapture()) surfaceView.requestPointerCapture()
+            onMouse(event, captured = false)
+            return true
+        }
         val window = focused?.takeIf { !it.minimized }
         if (window != null && event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
             window.content.motion(event)
             return true
         }
         return super.dispatchGenericMotionEvent(event)
+    }
+
+    // ------------------------------------------------------------------ Mouse and keyboard
+
+    /** Mouse clicks before the pointer is captured: the mouse's, not a touch on the phone. */
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        // BE: a tap anywhere on the screen clicks where the dot in the middle points.
+        if (BuildConfig.BE && event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> press(hit, ray)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> release()
+            }
+            return true
+        }
+        if (event.isFromSource(InputDevice.SOURCE_MOUSE)) {
+            if (!surfaceView.hasPointerCapture()) surfaceView.requestPointerCapture()
+            onMouse(event, captured = false)
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    /** A real keyboard (Bluetooth or USB), not the gamepad or the phone's own buttons. */
+    private fun physicalKeyboard(event: KeyEvent): Boolean {
+        val device = event.device ?: return false
+        if (device.isVirtual || event.isFromSource(InputDevice.SOURCE_GAMEPAD)) return false
+        return device.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC
+    }
+
+    /**
+     * Typing on a real keyboard: into the window that has a text field, else to the focused window
+     * as keys, else into the home's search (typing on the home starts a search, as on Horizon).
+     */
+    private fun typeKey(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN) return true
+        val text = when (event.keyCode) {
+            KeyEvent.KEYCODE_DEL -> "backspace"
+            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> "enter"
+            KeyEvent.KEYCODE_ESCAPE -> null
+            else -> event.unicodeChar.takeIf { it > 0 }?.toChar()?.toString()
+        }
+        onboarding?.let { setup -> text?.let { setup.type(it) }; return true }
+        if (event.keyCode == KeyEvent.KEYCODE_ESCAPE) {
+            runOnUiThread { @Suppress("DEPRECATION") onBackPressed() }
+            return true
+        }
+        val typing = keyboardWindow()
+        if (typing != null && text != null) {
+            typing.content.type(text)
+            keyboardRedraw.set(true)
+            return true
+        }
+        val window = focused?.takeIf { !it.minimized }
+        if (window != null) {
+            window.content.key(event)
+            return true
+        }
+        text ?: return true
+        val open = synchronized(panel) {
+            if (!panel.searching) {
+                if (text == "backspace" || text == "enter" || text == " ") return true
+                panel.openSearch()
+            }
+            panel.type(when (text) { "backspace" -> HomePanel.KEY_BACKSPACE; "enter" -> HomePanel.KEY_ENTER; " " -> HomePanel.KEY_SPACE; else -> text })
+        }
+        if (open != null) runOnUiThread { panelAction(HomePanel.Target.App(open)) }
+        redraw.set(true)
+        return true
+    }
+
+    /** The mouse pointer: a direction in the room, like a laser from the eyes, moved by the mouse. */
+    @Volatile private var mouseYaw = Float.NaN
+    @Volatile private var mousePitch = 0f
+    @Volatile private var mouseAt = 0L
+    @Volatile private var mouseDown = false
+    private var hoverX = Float.NaN
+    private var hoverY = Float.NaN
+
+    private fun mouseActive() = mouseAt != 0L && SystemClock.elapsedRealtime() - mouseAt < MOUSE_IDLE_MS
+
+    /** The mouse's direction in the room (unit vector), or null before it has moved. */
+    private fun mouseDirection(): FloatArray? {
+        if (mouseYaw.isNaN()) return null
+        val c = kotlin.math.cos(mousePitch)
+        return floatArrayOf(-kotlin.math.sin(mouseYaw) * c, kotlin.math.sin(mousePitch), -kotlin.math.cos(mouseYaw) * c, 0f)
+    }
+
+    private fun onMouse(event: MotionEvent, captured: Boolean) {
+        if (mouseYaw.isNaN()) {
+            // Start where the user looks.
+            val head = FloatArray(16).also { tracker.copyHead(it) }
+            mouseYaw = atan2(head[8], head[10])
+            mousePitch = 0f
+        }
+        mouseAt = SystemClock.elapsedRealtime()
+        when (event.actionMasked) {
+            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
+                val (dx, dy) = if (captured) event.x to event.y else {
+                    val d = if (hoverX.isNaN()) 0f to 0f else (event.x - hoverX) to (event.y - hoverY)
+                    hoverX = event.x; hoverY = event.y
+                    d
+                }
+                mouseYaw -= dx * MOUSE_SPEED
+                mousePitch = (mousePitch - dy * MOUSE_SPEED).coerceIn(-1.3f, 1.3f)
+            }
+            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_DOWN -> {
+                if (event.isButtonPressed(MotionEvent.BUTTON_SECONDARY)) {
+                    runOnUiThread { @Suppress("DEPRECATION") onBackPressed() }
+                    return
+                }
+                if (!mouseDown) {
+                    mouseDown = true
+                    press(hit, mouseDirection())
+                }
+            }
+            MotionEvent.ACTION_BUTTON_RELEASE, MotionEvent.ACTION_UP -> if (mouseDown && !event.isButtonPressed(MotionEvent.BUTTON_PRIMARY)) {
+                mouseDown = false
+                release()
+            }
+            MotionEvent.ACTION_SCROLL -> scroll(event.getAxisValue(MotionEvent.AXIS_VSCROLL))
+        }
+        val direction = mouseDirection() ?: return
+        ray = direction
+        pinchPoint = null
+        val target = hitTest(direction)
+        updateHit(target)
+        if (mouseDown) dragOrMove(direction)
+    }
+
+    /** The wheel: pages on the home, a drag on a window (as a finger would scroll it). */
+    private fun scroll(amount: Float) {
+        if (amount == 0f) return
+        when (val target = hit) {
+            is Hit.Panel -> { synchronized(panel) { panel.turnPage(if (amount < 0) 1 else -1) }; redraw.set(true) }
+            is Hit.Content -> {
+                val content = target.window.content
+                val to = (target.v + amount * .12f).coerceIn(0f, 1f)
+                content.touch(MotionEvent.ACTION_DOWN, target.u, target.v)
+                content.touch(MotionEvent.ACTION_MOVE, target.u, (target.v + to) / 2)
+                content.touch(MotionEvent.ACTION_MOVE, target.u, to)
+                content.touch(MotionEvent.ACTION_UP, target.u, to)
+            }
+            else -> Unit
+        }
     }
 
     @Deprecated("Deprecated in Java")
@@ -1332,88 +2144,35 @@ class VrHomeActivity : Activity(), LifecycleOwner {
 
     // ------------------------------------------------------------------ Icons of the built-in apps
 
-    private fun drawBrowserIcon(): Drawable = iconCanvas { canvas, size ->
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        paint.shader = LinearGradient(0f, 0f, 0f, size, Color.rgb(90, 200, 250), Color.rgb(0, 122, 255), Shader.TileMode.CLAMP)
-        canvas.drawRect(0f, 0f, size, size, paint)
-        paint.shader = null
-        paint.color = Color.WHITE
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = size * .035f
-        canvas.drawCircle(size / 2, size / 2, size * .32f, paint)
-        paint.style = Paint.Style.FILL
-        val c = size / 2
-        paint.color = Color.rgb(255, 59, 48)
-        canvas.drawPath(Path().apply { moveTo(c + size * .2f, c - size * .2f); lineTo(c - size * .05f, c - size * .05f); lineTo(c + size * .05f, c + size * .05f); close() }, paint)
-        paint.color = Color.WHITE
-        canvas.drawPath(Path().apply { moveTo(c - size * .2f, c + size * .2f); lineTo(c - size * .05f, c - size * .05f); lineTo(c + size * .05f, c + size * .05f); close() }, paint)
-    }
-
-    /** Elix: a glowing orb in Siri-like colours. */
-    private fun drawElixIcon(): Drawable = iconCanvas { canvas, size ->
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        canvas.drawColor(Color.rgb(10, 10, 16))
-        val colors = intArrayOf(Color.rgb(255, 64, 160), Color.rgb(120, 90, 255), Color.rgb(40, 200, 255), Color.rgb(255, 150, 60))
-        colors.forEachIndexed { i, color ->
-            val angle = i * Math.PI / 2
-            paint.shader = android.graphics.RadialGradient(
-                size / 2 + (Math.cos(angle) * size * .12).toFloat(), size / 2 + (Math.sin(angle) * size * .12).toFloat(), size * .3f,
-                color, Color.TRANSPARENT, Shader.TileMode.CLAMP
-            )
-            canvas.drawCircle(size / 2, size / 2, size * .42f, paint)
-        }
-        paint.shader = android.graphics.RadialGradient(size / 2, size / 2, size * .16f, Color.WHITE, Color.TRANSPARENT, Shader.TileMode.CLAMP)
-        canvas.drawCircle(size / 2, size / 2, size * .2f, paint)
-    }
-
-    private fun drawStoreIcon(): Drawable = iconCanvas { canvas, size ->
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        paint.shader = LinearGradient(0f, 0f, 0f, size, Color.rgb(255, 159, 10), Color.rgb(255, 94, 58), Shader.TileMode.CLAMP)
-        canvas.drawRect(0f, 0f, size, size, paint)
-        paint.shader = null
-        paint.color = Color.WHITE
-        canvas.drawRoundRect(RectF(size * .28f, size * .38f, size * .72f, size * .74f), size * .05f, size * .05f, paint)
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = size * .04f
-        canvas.drawArc(RectF(size * .38f, size * .24f, size * .62f, size * .48f), 180f, 180f, false, paint)
-    }
-
-    private fun drawPhotosIcon(): Drawable = iconCanvas { canvas, size ->
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        canvas.drawColor(Color.WHITE)
-        val colors = intArrayOf(
-            Color.rgb(255, 204, 0), Color.rgb(255, 149, 0), Color.rgb(255, 59, 48), Color.rgb(255, 45, 85),
-            Color.rgb(175, 82, 222), Color.rgb(0, 122, 255), Color.rgb(52, 199, 89), Color.rgb(163, 212, 64),
-        )
-        colors.forEachIndexed { i, color ->
-            paint.color = (color and 0x00ffffff) or (0xd0 shl 24)
-            canvas.save()
-            canvas.rotate(i * 45f, size / 2, size / 2)
-            canvas.drawRoundRect(RectF(size * .42f, size * .14f, size * .58f, size * .5f), size * .08f, size * .08f, paint)
-            canvas.restore()
-        }
-    }
-
-    private fun drawMinecraftIcon(): Drawable = iconCanvas { canvas, size ->
-        val paint = Paint()
-        paint.color = Color.rgb(121, 85, 58)
-        canvas.drawRect(0f, 0f, size, size, paint)
-        paint.color = Color.rgb(95, 159, 53)
-        canvas.drawRect(0f, 0f, size, size * .4f, paint)
-        paint.color = Color.rgb(94, 64, 42)
-        for (i in 0 until 8) canvas.drawRect(i * size / 8, size * .5f + (i % 3) * size * .12f, (i + 1) * size / 8, size * .6f + (i % 3) * size * .12f, paint)
-    }
-
-    private fun symbolIcon(symbol: String, color: Int): Drawable = iconCanvas { canvas, size ->
+    private fun symbolIcon(symbol: String, color: Int, ink: Int = Color.WHITE): Drawable = iconCanvas { canvas, size ->
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
         canvas.drawRect(0f, 0f, size, size, paint)
-        paint.color = Color.WHITE
+        paint.color = ink
         paint.textSize = size * .42f
         paint.textAlign = Paint.Align.CENTER
         canvas.drawText(symbol, size / 2, size / 2 + size * .15f, paint)
     }
 
-    private fun letterIcon(name: String): Drawable = symbolIcon(name.take(1).uppercase(), Color.rgb(88, 86, 214))
+    /** The first letter on a Material You tile in a colour of the name's own. */
+    private fun letterIcon(name: String): Drawable =
+        MaterialYouIcons.palette(name, MaterialYouIcons.dark(this)).let { symbolIcon(name.take(1).uppercase(), it.tile, it.glyph) }
+
+    /** A Material icon in [ink] on a clear square: the vector's own paths, drawn at 256 px. */
+    private fun vectorIcon(icon: androidx.compose.ui.graphics.vector.ImageVector, ink: Int): Drawable = iconCanvas { canvas, size ->
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ink }
+        val scale = size / icon.viewportWidth
+        canvas.save()
+        canvas.scale(scale, scale)
+        fun draw(group: androidx.compose.ui.graphics.vector.VectorGroup) {
+            for (child in group) when (child) {
+                is androidx.compose.ui.graphics.vector.VectorPath ->
+                    canvas.drawPath(androidx.compose.ui.graphics.vector.PathParser().addPathNodes(child.pathData).toPath().asAndroidPath(), paint)
+                is androidx.compose.ui.graphics.vector.VectorGroup -> draw(child)
+            }
+        }
+        draw(icon.root)
+        canvas.restore()
+    }
 
     private fun iconCanvas(paint: (Canvas, Float) -> Unit): Drawable {
         val bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
@@ -1431,10 +2190,16 @@ class VrHomeActivity : Activity(), LifecycleOwner {
      * never glued to the nose.
      */
     @Volatile private var panelYaw = 0f
-    private var panelFollows = true
+    private var panelFollows = false
 
+    /**
+     * The home follows the eyes lazily; in car mode the windows come too — the whole view drifts
+     * after the head, but only once it has looked away far enough and then smoothly, so it stays
+     * put for reading and never feels glued to the head.
+     */
     private fun followWithPanel() {
-        if (!panelFollows) return
+        val car = carMode
+        if (!panelFollows && !car) return
         val head = FloatArray(16)
         tracker.copyHead(head)
         // Straight ahead in world coordinates is the head's own -z.
@@ -1444,9 +2209,32 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         var delta = headYaw - panelYaw
         while (delta > 180f) delta -= 360f
         while (delta < -180f) delta += 360f
-        val beyond = abs(delta) - PANEL_DEAD_ZONE
+        val beyond = abs(delta) - (if (car) CAR_DEAD_ZONE else PANEL_DEAD_ZONE)
         if (beyond <= 0f) return
-        panelYaw += (if (delta > 0) beyond else -beyond) * PANEL_CATCH_UP
+        val step = (if (delta > 0) beyond else -beyond) * (if (car) CAR_CATCH_UP else PANEL_CATCH_UP)
+        panelYaw += step
+        if (car) for (window in windows) window.yaw += step
+    }
+
+    /** Car mode: 3DoF, the vehicle's turns taken out, and the windows following the view. */
+    @Volatile private var carMode = false
+
+    /** Car mode on or off, at once: in the car the camera's 6DoF is stopped (the room itself moves). */
+    private fun setCarMode(on: Boolean) = runOnUiThread {
+        Settings.setTravelMode(this, on)
+        carMode = on
+        tracker.travelMode = on
+        synchronized(panel) { panel.car = on }
+        if (on) {
+            ar?.let { tracker6 -> ar = null; tracker6.pause(); tracker6.close(); bindCamera() }
+            sensorSixDof?.stop()
+            synchronized(headPosition) { headPosition.fill(0f) }
+            toast(tr("Режим машины: 3DoF, окна следуют за взглядом"))
+        } else {
+            sensorSixDof?.let { it.reset(); it.start() }
+            if (Settings.load(this).sixDof) startArLater()
+        }
+        redraw.set(true)
     }
 
     private inner class Renderer : GLSurfaceView.Renderer {
@@ -1505,13 +2293,13 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             return data.toFloatArray()
         }
         private var panelTexture = 0
+        private var panelSurface: SurfaceTexture? = null
+        private val panelFrame = AtomicBoolean(false)
         private var cameraTexture = 0
-        private var controlsTexture = 0
         private var desktopControlsTexture = 0
         private var keyboardTexture = 0
         /** ARCore draws the camera into this external texture (6DoF passthrough). */
         private var arTexture = 0
-        private var warningTexture = 0
         private var tracingTexture = 0
         private var textureProgram = 0
         private var externalProgram = 0
@@ -1522,7 +2310,6 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         private var cardboardProgram = 0
         private var cardboardTexture = 0
         private var cardboardFramebuffer = 0
-        private val toolbarTextures = HashMap<String, Pair<Int, Int>>()
         private var hasCamera = false
         private var cameraAspect = 16f / 9f
         private var width = 1
@@ -1539,7 +2326,8 @@ class VrHomeActivity : Activity(), LifecycleOwner {
 
         override fun onSurfaceCreated(unused: GL10?, config: EGLConfig?) {
             eyes = Eyes.load(this@VrHomeActivity)
-            panelFollows = Settings.panelFollows(this@VrHomeActivity)
+            // The home stays where it was put; only car mode brings the view along.
+            panelFollows = false
             textureProgram = CinemaRenderer.program(TEXTURE_VERTEX, TEXTURE_FRAGMENT)
             externalProgram = CinemaRenderer.program(TEXTURE_VERTEX, EXTERNAL_FRAGMENT)
             colorProgram = CinemaRenderer.program(COLOR_VERTEX, COLOR_FRAGMENT)
@@ -1548,19 +2336,25 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             cardboardProgram = CinemaRenderer.program(TEXTURE_VERTEX, CARDBOARD_FRAGMENT)
             val ids = IntArray(4)
             GLES20.glGenTextures(4, ids, 0)
-            panelTexture = ids[0]
             cameraTexture = ids[1]
-            controlsTexture = ids[2]
+            // The home panel is compose-hig on a virtual display: an external texture fed by its surface.
+            panelTexture = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, panelTexture)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            panelSurface?.release()
+            panelContent?.release()
+            val surface = SurfaceTexture(panelTexture).also { it.setOnFrameAvailableListener { panelFrame.set(true) } }
+            panelSurface = surface
+            panelContent = HomePanelContent(panel).also { it.attach(this@VrHomeActivity, surface) {} }
             desktopControlsTexture = ids[3]
-            for (id in ids) {
+            for (id in ids.drop(1)) {
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
             }
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, controlsTexture)
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, drawControls(), 0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, desktopControlsTexture)
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, drawDesktopControls(), 0)
             keyboardTexture = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
@@ -1577,8 +2371,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, onboardingTexture)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            warningTexture = bannerTexture("Вы вышли за границу — вернитесь назад", Color.rgb(255, 69, 58))
-            tracingTexture = bannerTexture("Закончить сканирование · щипок", Color.rgb(10, 132, 255))
+            tracingTexture = bannerTexture("Закончить сканирование · сожмите кулак", Color.rgb(10, 132, 255))
             redraw.set(true)
         }
 
@@ -1618,6 +2411,33 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         }
 
         /** Google Cardboard's rendering order: draw eyes to a texture, then lens-distort it. */
+        private var scanFrames = 0
+
+        /**
+         * The room scan as grids on the floor, the walls and the table (the table in the accent
+         * colour) while the room is being set up.
+         */
+        private fun roomGrid(world: FloatArray) {
+            val tracker6 = ar ?: return
+            val setup = onboarding?.step == Onboarding.Step.ROOM
+            if (!setup) return
+            val surfaces = tracker6.surfaces
+            if (surfaces.isEmpty()) return
+            GLES20.glUseProgram(colorProgram)
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(colorProgram, "uMvp"), 1, false, world, 0)
+            val color = GLES20.glGetUniformLocation(colorProgram, "uColor")
+            val position = GLES20.glGetAttribLocation(colorProgram, "aPosition")
+            GLES20.glLineWidth(2f)
+            for (surface in surfaces) {
+                when (surface.kind) {
+                    RoomScan.Kind.TABLE -> GLES20.glUniform4f(color, .45f, .8f, 1f, .85f)
+                    RoomScan.Kind.FLOOR -> GLES20.glUniform4f(color, 1f, 1f, 1f, .45f)
+                    else -> GLES20.glUniform4f(color, 1f, 1f, 1f, .3f)
+                }
+                drawArray(surface.lines, GLES20.GL_LINES, position)
+            }
+        }
+
         private fun createCardboardTarget(w: Int, h: Int) {
             if (cardboardTexture != 0) GLES20.glDeleteTextures(1, intArrayOf(cardboardTexture), 0)
             if (cardboardFramebuffer != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(cardboardFramebuffer), 0)
@@ -1637,13 +2457,53 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             check(GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE) {
                 "Cardboard framebuffer is incomplete"
             }
+            attachStencil(w, h)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        }
+
+        private var stencilBuffer = 0
+        /** The see-through hands are drawn once per pixel with the stencil; without one they are solid. */
+        private var hasStencil = false
+        /** A depth buffer for the 3D controller models (nothing else tests depth). */
+        private var hasDepth = false
+
+        /**
+         * A stencil for the eye framebuffer (nothing else uses it): an 8-bit one, or the packed
+         * depth-stencil some GPUs need. If neither works the framebuffer stays as it was.
+         */
+        private fun attachStencil(w: Int, h: Int) {
+            if (stencilBuffer != 0) GLES20.glDeleteRenderbuffers(1, intArrayOf(stencilBuffer), 0)
+            stencilBuffer = IntArray(1).also { GLES20.glGenRenderbuffers(1, it, 0) }[0]
+            GLES20.glBindRenderbuffer(GLES20.GL_RENDERBUFFER, stencilBuffer)
+            hasStencil = false
+            hasDepth = false
+            // Depth and stencil together where the GPU has it: the controller models need depth.
+            if (GLES20.glGetString(GLES20.GL_EXTENSIONS)?.contains("GL_OES_packed_depth_stencil") == true) {
+                GLES20.glRenderbufferStorage(GLES20.GL_RENDERBUFFER, GLES11Ext.GL_DEPTH24_STENCIL8_OES, w, h)
+                GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_DEPTH_ATTACHMENT, GLES20.GL_RENDERBUFFER, stencilBuffer)
+                GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_STENCIL_ATTACHMENT, GLES20.GL_RENDERBUFFER, stencilBuffer)
+                if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE) { hasStencil = true; hasDepth = true; return }
+                GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_DEPTH_ATTACHMENT, GLES20.GL_RENDERBUFFER, 0)
+                GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_STENCIL_ATTACHMENT, GLES20.GL_RENDERBUFFER, 0)
+            }
+            GLES20.glRenderbufferStorage(GLES20.GL_RENDERBUFFER, GLES20.GL_STENCIL_INDEX8, w, h)
+            GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_STENCIL_ATTACHMENT, GLES20.GL_RENDERBUFFER, stencilBuffer)
+            if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE) { hasStencil = true; return }
+            GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_STENCIL_ATTACHMENT, GLES20.GL_RENDERBUFFER, 0)
+            if (GLES20.glGetString(GLES20.GL_EXTENSIONS)?.contains("GL_OES_packed_depth_stencil") == true) {
+                GLES20.glRenderbufferStorage(GLES20.GL_RENDERBUFFER, GLES11Ext.GL_DEPTH24_STENCIL8_OES, w, h)
+                GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_STENCIL_ATTACHMENT, GLES20.GL_RENDERBUFFER, stencilBuffer)
+                if (GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE) { hasStencil = true; return }
+                GLES20.glFramebufferRenderbuffer(GLES20.GL_FRAMEBUFFER, GLES20.GL_STENCIL_ATTACHMENT, GLES20.GL_RENDERBUFFER, 0)
+            }
         }
 
         /** 6DoF: one ARCore step — head position, and a camera frame for the hands when they are free. */
         private fun updateAr(tracker6: ArTracker) {
             tracker.copyHead(head)
             val job = tracker6.update(head, wantImage = !busy.get())
+            // The table, once a second: where it stands is remembered for the keyboard.
+            if (++scanFrames % 60 == 0) RoomScan.remember(this@VrHomeActivity, tracker6.surfaces)
             if (job != null && busy.compareAndSet(false, true)) {
                 trackingExecutor.execute {
                     try {
@@ -1651,9 +2511,12 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                         if (frame != null) {
                             arFrameMap = floatArrayOf(frame.viewLeft, frame.viewTop, frame.viewWidth, frame.viewHeight)
                             handTracker?.detect(frame.bitmap, frame.timestampNs / 1_000_000L)
-                            val old = arPhoto
-                            arPhoto = frame.bitmap
-                            old?.recycle()
+                            // Swapped under the lock that photo and call snapshots read it with.
+                            synchronized(frameLock) {
+                                val old = arPhoto
+                                arPhoto = frame.bitmap
+                                old?.recycle()
+                            }
                         }
                     } catch (error: Throwable) {
                         Log.w(TAG, "ARCore frame failed", error)
@@ -1663,23 +2526,20 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                 }
             }
             synchronized(headPosition) { synchronized(tracker6.position) { System.arraycopy(tracker6.position, 0, headPosition, 0, 3) } }
-            if (boundary.tracing != null && tracker6.tracking && boundary.addPoint(headPosition[0], headPosition[2])) {
-                toast("Граница сохранена")
-            }
         }
 
         override fun onDrawFrame(unused: GL10?) {
             while (true) glTasks.poll()?.invoke() ?: break
             followWithPanel()
+            if (BuildConfig.BE) gaze()
             val tracker6 = ar
             if (tracker6 != null) updateAr(tracker6)
+            else if (neckModel && !carMode) neck()
             if (redraw.getAndSet(false)) {
-                synchronized(panel) {
-                    panel.draw(hoveredPanel, pressing)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, panelTexture)
-                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, panel.bitmap, 0)
-                }
+                // The layout (where each target is) and the compose-hig panel's state, which redraws itself.
+                synchronized(panel) { panel.draw(hoveredPanel, pressing) }
             }
+            if (panelFrame.getAndSet(false)) panelSurface?.updateTexImage()
             val setup = onboarding
             if (setup != null) {
                 // The setup animates every frame (hello, progress, the cursor in the name field).
@@ -1715,10 +2575,42 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                 }
             }
 
+            // WebXR: the page draws both eyes plainly, with PhoneXR's own field of view; the same
+            // lens pass as everything else (and the headset's lens shift) then goes over it.
+            windows.firstOrNull { it.content.immersive }?.let { xrWindow ->
+                val texture = textures[xrWindow.id] ?: return@let
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, cardboardFramebuffer)
+                GLES20.glViewport(0, 0, width, height)
+                GLES20.glClearColor(0f, 0f, 0f, 1f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                // WebXR AR: the camera in each eye first, the page (transparent where it draws nothing) over it.
+                if (xrWindow.content.immersiveAr && hasCamera) {
+                    val eyeAspect = (width / 2f) / height
+                    val (u0, u1, v0, v1) = if (eyeAspect < cameraAspect) {
+                        val span = eyeAspect / cameraAspect
+                        listOf(.5f - span / 2, .5f + span / 2, 0f, 1f)
+                    } else {
+                        val span = cameraAspect / eyeAspect
+                        listOf(0f, 1f, .5f - span / 2, .5f + span / 2)
+                    }
+                    for (x0 in floatArrayOf(-1f, 0f)) {
+                        val x1 = x0 + 1f
+                        quad(textureProgram, cameraTexture, identity, floatArrayOf(x0, -1f, 0f, u0, v1, x1, -1f, 0f, u1, v1, x0, 1f, 0f, u0, v0, x1, 1f, 0f, u1, v0))
+                    }
+                    GLES20.glEnable(GLES20.GL_BLEND)
+                    GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                }
+                quad(externalProgram, texture, identity, floatArrayOf(-1f, -1f, 0f, 0f, 1f, 1f, -1f, 0f, 1f, 1f, -1f, 1f, 0f, 0f, 0f, 1f, 1f, 0f, 1f, 0f), external = true)
+                GLES20.glDisable(GLES20.GL_BLEND)
+                lensPass()
+                return
+            }
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, cardboardFramebuffer)
             GLES20.glClearColor(.08f, .08f, .1f, 1f)
             GLES20.glViewport(0, 0, width, height)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glClearStencil(0)
+            GLES20.glClearDepthf(1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or (if (hasStencil) GLES20.GL_STENCIL_BUFFER_BIT else 0) or (if (hasDepth) GLES20.GL_DEPTH_BUFFER_BIT else 0))
             tracker.copyHead(head)
             Matrix.transposeM(worldToHead, 0, head, 0)
             // 6DoF: the world moves opposite to the head.
@@ -1744,7 +2636,6 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             for (index in 0..1) {
                 if (tracker6 != null) synchronized(tracker6.projection) { System.arraycopy(tracker6.projection, 0, projection, 0, 16) }
                 else Matrix.perspectiveM(projection, 0, 90f, eyeWidth.toFloat() / height, .05f, 100f)
-                lenses.shift(projection, index, eyeWidth)
                 GLES20.glViewport(index * eyeWidth, 0, eyeWidth, height)
                 // Passthrough fills each eye; the camera image is cropped to the eye's shape.
                 // A chosen place takes the room's stead and is drawn below, once the view is known.
@@ -1779,6 +2670,9 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                     GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(textureProgram, "uMvp"), 1, false, mvp, 0)
                     triangles(textureProgram, mesh)
                 }
+                // The room sliders: dim the room, then fog and rain in it, all under the home and windows.
+                atmosphere(mvp, position)
+                roomGrid(mvp)
 
                 // Home icons, turned to where the panel hangs.
                 val panelPlace = FloatArray(16)
@@ -1788,7 +2682,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                 if (onboarding != null) {
                     val sw = PANEL_WIDTH / 2
                     val sh = sw * Onboarding.HEIGHT / Onboarding.WIDTH
-                    val sz = -PANEL_RADIUS
+                    val sz = -panelRadius
                     quad(textureProgram, onboardingTexture, panelMvp, floatArrayOf(-sw, -sh, sz, 0f, 1f, sw, -sh, sz, 1f, 1f, -sw, sh, sz, 0f, 0f, sw, sh, sz, 1f, 0f))
                 } else if (panelVisible) {
                     // After setup the home flies in from a little further away and grows into place.
@@ -1797,8 +2691,8 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                     val grow = .6f + .4f * ease
                     val pw = PANEL_WIDTH / 2 * grow
                     val ph = PANEL_HEIGHT / 2 * grow
-                    val pz = -PANEL_RADIUS - (1f - ease) * .9f
-                    quad(textureProgram, panelTexture, panelMvp, floatArrayOf(-pw, -ph, pz, 0f, 1f, pw, -ph, pz, 1f, 1f, -pw, ph, pz, 0f, 0f, pw, ph, pz, 1f, 0f))
+                    val pz = -panelRadius - (1f - ease) * .9f
+                    quad(externalProgram, panelTexture, panelMvp, floatArrayOf(-pw, -ph, pz, 0f, 1f, pw, -ph, pz, 1f, 1f, -pw, ph, pz, 0f, 0f, pw, ph, pz, 1f, 0f), external = true)
                 }
 
                 // Windows, focused last so it is on top.
@@ -1811,7 +2705,7 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                     Matrix.multiplyMM(mvp, 0, projection, 0, modelView, 0)
                     val w = window.width / 2
                     val h = window.heightM / 2
-                    val z = -VrWindow.RADIUS
+                    val z = -windowRadius
                     val uv = window.content.uv(index)
                     val top = uv[1]
                     val bottom = uv[3]
@@ -1825,45 +2719,122 @@ class VrHomeActivity : Activity(), LifecycleOwner {
                         GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "uRadius"), CORNER_RADIUS)
                         quad(program, texture, mvp, floatArrayOf(-w, -h, z, uv[0], bottom, w, -h, z, uv[2], bottom, -w, h, z, uv[0], top, w, h, z, uv[2], top), window.content.external)
                     }
-                    window.content.toolbarTitle()?.let { title -> toolbar(window, title, mvp, h, z) }
-                    // Controls under the window: minimize, move bar, close.
-                    val barY = -h - BAR_OFFSET
+                    // The frame, as on Quest: the browser's bar on top, or a bar along the bottom
+                    // (close, minimize, title, keyboard); and a handle under it to move the window.
                     val hovered = hit
                     val dragging = drag
-                    control(mvp, -BUTTON_X - KEYBOARD_BUTTON_GAP, barY, .035f, .035f, .8f, 1f, hovered is Hit.KeyboardButton && hovered.window == window || typing == window, z)
-                    control(mvp, -BUTTON_X, barY, .035f, .035f, 0f, .2f, hovered is Hit.Minimize && hovered.window == window, z)
-                    control(mvp, 0f, barY, .2f, .018f, .2f, .6f, hovered is Hit.Bar && hovered.window == window || dragging?.window == window && !dragging.resize, z)
-                    control(mvp, BUTTON_X, barY, .035f, .035f, .6f, .8f, hovered is Hit.Close && hovered.window == window, z)
-                    resizeHandle(mvp, w, h, z, hovered is Hit.Resize && hovered.window == window || dragging?.window == window && dragging.resize)
-                    if (window.id == "desktop") desktopControls(mvp, barY - .15f, z)
+                    val held = grab?.window == window || hovered is Hit.Bar && hovered.window == window || dragging?.window == window && !dragging.resize
+                    val title = window.content.toolbarTitle()
+                    if (window.content is BrowserContent && title != null) browserBar(window, title, mvp, w, h, z)
+                    val lit = when {
+                        hovered is Hit.Close && hovered.window == window -> "close"
+                        hovered is Hit.Minimize && hovered.window == window -> "minimize"
+                        hovered is Hit.Expand && hovered.window == window -> "expand"
+                        hovered is Hit.Curve && hovered.window == window -> "curve"
+                        hovered is Hit.KeyboardButton && hovered.window == window -> "keyboard"
+                        hovered is Hit.Toolbar && hovered.window == window && hovered.u < 0f -> "back"
+                        else -> null
+                    }
+                    val name = if (window.content is BrowserContent) window.title else title ?: window.title
+                    pill(window, name, mvp, h, z, typing == window, lit, held)
+                    // Held by the hand (or with the hand at its edge): a glowing white frame, as on Quest.
+                    val grabbed = grab?.window == window
+                    if (grabbed || grabHover == window) grabFrame(window, mvp, w, h, z, if (grabbed) 1f else .45f)
+                    val handleY = frameBottom(window) - WindowChrome.HANDLE_GAP
+                    if (window.id == "desktop") desktopControls(mvp, handleY - .12f, z)
                 }
-                if (typing != null) {
+                val onTable = typing?.let { tableKeyboard(it) }
+                if (onTable != null) {
+                    // The keyboard lies on the remembered table, facing the user.
+                    Matrix.setIdentityM(model, 0)
+                    Matrix.translateM(model, 0, onTable[0], onTable[1], onTable[2])
+                    Matrix.rotateM(model, 0, onTable[3], 0f, 1f, 0f)
+                    Matrix.rotateM(model, 0, -90f, 1f, 0f, 0f)
+                    Matrix.multiplyMM(modelView, 0, view, 0, model, 0)
+                    Matrix.multiplyMM(mvp, 0, projection, 0, modelView, 0)
+                    val kw = TABLE_KEYBOARD_W / 2
+                    val kh = TABLE_KEYBOARD_H / 2
+                    quad(textureProgram, keyboardTexture, mvp, floatArrayOf(-kw, -kh, 0f, 0f, 1f, kw, -kh, 0f, 1f, 1f, -kw, kh, 0f, 0f, 0f, kw, kh, 0f, 1f, 0f))
+                } else if (typing != null) {
                     Matrix.setRotateM(model, 0, typing.yaw, 0f, 1f, 0f)
                     Matrix.multiplyMM(modelView, 0, view, 0, model, 0)
                     Matrix.multiplyMM(mvp, 0, projection, 0, modelView, 0)
                     val kw = KEYBOARD_W / 2
                     val kh = KEYBOARD_H / 2
                     val ky = keyboardCenterY(typing)
-                    val kz = -KEYBOARD_RADIUS
+                    val kz = -keyboardRadius
                     quad(textureProgram, keyboardTexture, mvp, floatArrayOf(-kw, ky - kh, kz, 0f, 1f, kw, ky - kh, kz, 1f, 1f, -kw, ky + kh, kz, 0f, 0f, kw, ky + kh, kz, 1f, 0f))
                 }
-                drawBoundary(position)
                 hand()
             }
             GLES20.glDisable(GLES20.GL_BLEND)
-            // Compensate for Cardboard lenses only after the complete stereo scene exists.
+            lensPass()
+        }
+
+        /** Compensate for Cardboard lenses only after the complete stereo scene exists. */
+        private fun lensPass() {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
             GLES20.glViewport(0, 0, width, height)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glUseProgram(cardboardProgram)
-            GLES20.glUniform1f(GLES20.glGetUniformLocation(cardboardProgram, "uEyeAspect"), (width * .5f) / height)
+            // Each eye's picture moved in under its lens (see Eyes.lensShift).
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(cardboardProgram, "uLensShift"), eyes.lensShift)
             quad(cardboardProgram, cardboardTexture, identity, floatArrayOf(
                 -1f, -1f, 0f, 0f, 0f,
                  1f, -1f, 0f, 1f, 0f,
                 -1f,  1f, 0f, 0f, 1f,
                  1f,  1f, 0f, 1f, 1f,
             ))
+            record()
+        }
+
+        // ---------------------------------------------------------------- recording (as on Quest)
+
+        @Volatile var pendingRecorder: VideoRecorder? = null
+        @Volatile var stopRecording: ((Boolean) -> Unit)? = null
+        private var recorder: VideoRecorder? = null
+        private var recordSurface: android.opengl.EGLSurface = android.opengl.EGL14.EGL_NO_SURFACE
+        val recording get() = recorder != null || pendingRecorder != null
+
+        /** The left eye, without the lens warp, into the video: what the user sees, flat. */
+        private fun record() {
+            val display = android.opengl.EGL14.eglGetCurrentDisplay()
+            val context = android.opengl.EGL14.eglGetCurrentContext()
+            pendingRecorder?.let { next ->
+                pendingRecorder = null
+                val id = IntArray(1)
+                android.opengl.EGL14.eglQueryContext(display, context, android.opengl.EGL14.EGL_CONFIG_ID, id, 0)
+                val configs = arrayOfNulls<android.opengl.EGLConfig>(1)
+                android.opengl.EGL14.eglChooseConfig(display, intArrayOf(android.opengl.EGL14.EGL_CONFIG_ID, id[0], android.opengl.EGL14.EGL_NONE), 0, configs, 0, 1, IntArray(1), 0)
+                recordSurface = configs[0]?.let {
+                    android.opengl.EGL14.eglCreateWindowSurface(display, it, next.surface, intArrayOf(android.opengl.EGL14.EGL_NONE), 0)
+                } ?: android.opengl.EGL14.EGL_NO_SURFACE
+                recorder = next
+            }
+            val active = recorder ?: return
+            val draw = android.opengl.EGL14.eglGetCurrentSurface(android.opengl.EGL14.EGL_DRAW)
+            val read = android.opengl.EGL14.eglGetCurrentSurface(android.opengl.EGL14.EGL_READ)
+            if (recordSurface != android.opengl.EGL14.EGL_NO_SURFACE &&
+                android.opengl.EGL14.eglMakeCurrent(display, recordSurface, recordSurface, context)) {
+                GLES20.glViewport(0, 0, active.width, active.height)
+                quad(textureProgram, cardboardTexture, identity, floatArrayOf(
+                    -1f, -1f, 0f, 0f, 0f,
+                     1f, -1f, 0f, .5f, 0f,
+                    -1f,  1f, 0f, 0f, 1f,
+                     1f,  1f, 0f, .5f, 1f,
+                ))
+                android.opengl.EGLExt.eglPresentationTimeANDROID(display, recordSurface, System.nanoTime())
+                android.opengl.EGL14.eglSwapBuffers(display, recordSurface)
+                android.opengl.EGL14.eglMakeCurrent(display, draw, read, context)
+            }
+            stopRecording?.let { done ->
+                stopRecording = null
+                if (recordSurface != android.opengl.EGL14.EGL_NO_SURFACE) android.opengl.EGL14.eglDestroySurface(display, recordSurface)
+                recordSurface = android.opengl.EGL14.EGL_NO_SURFACE
+                recorder = null
+                Thread { done(active.stop()) }.start()
+            }
         }
 
         /** visionOS-style corner arc at the bottom right: drag it to resize the window. */
@@ -1894,13 +2865,6 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, data.size / 5)
         }
 
-        private fun control(mvp: FloatArray, x: Float, y: Float, hw: Float, hh: Float, u0: Float, u1: Float, active: Boolean, z: Float) {
-            val grow = if (active) 1.25f else 1f
-            val w = hw * grow
-            val h = hh * grow
-            quad(textureProgram, controlsTexture, mvp, floatArrayOf(x - w, y - h, z, u0, 1f, x + w, y - h, z, u1, 1f, x - w, y + h, z, u0, 0f, x + w, y + h, z, u1, 0f))
-        }
-
         private fun desktopControls(mvp: FloatArray, y: Float, z: Float) {
             val w = .57f; val h = .075f
             quad(textureProgram, desktopControlsTexture, mvp, floatArrayOf(
@@ -1917,9 +2881,9 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             fun point(step: Int, top: Boolean) {
                 val s = step.toFloat() / segments
                 val angle = (s - .5f) * span
-                out += kotlin.math.sin(angle) * VrWindow.RADIUS
+                out += kotlin.math.sin(angle) * windowRadius
                 out += if (top) halfHeight else -halfHeight
-                out += -kotlin.math.cos(angle) * VrWindow.RADIUS
+                out += -kotlin.math.cos(angle) * windowRadius
                 out += uv[0] + (uv[2] - uv[0]) * s
                 out += if (top) uv[1] else uv[3]
             }
@@ -1931,119 +2895,95 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         }
 
         /** Safari-style bar above a window: back, forward, address, reload. */
-        private fun toolbar(window: VrWindow, title: String, mvp: FloatArray, h: Float, z: Float) {
-            val version = window.content.toolbarVersion
-            val cached = toolbarTextures[window.id]
-            val texture = if (cached == null || cached.second != version) {
-                val id = cached?.first ?: IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
-                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, drawToolbar(title), 0)
-                toolbarTextures[window.id] = id to version
-                id
-            } else cached.first
-            val y = h + TOOLBAR_GAP + TOOLBAR_H / 2
-            val w = TOOLBAR_W / 2
-            val th = TOOLBAR_H / 2
-            quad(textureProgram, texture, mvp, floatArrayOf(-w, y - th, z, 0f, 1f, w, y - th, z, 1f, 1f, -w, y + th, z, 0f, 0f, w, y + th, z, 1f, 0f))
+        /** Cached textures of the frames: the texture and what it was drawn for. */
+        private val frameTextures = HashMap<String, Pair<Int, String>>()
+
+        private fun frameTexture(key: String, stamp: String, draw: () -> Bitmap): Int {
+            val cached = frameTextures[key]
+            if (cached != null && cached.second == stamp) return cached.first
+            val id = cached?.first ?: IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            val bitmap = draw()
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            bitmap.recycle()
+            frameTextures[key] = id to stamp
+            return id
         }
 
-        private fun drawToolbar(title: String): Bitmap {
-            val bitmap = Bitmap.createBitmap(1200, 140, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-            paint.color = Color.argb(185, 70, 64, 58)
-            canvas.drawRoundRect(RectF(0f, 0f, 1200f, 140f), 70f, 70f, paint)
-            paint.color = Color.argb(110, 30, 26, 22)
-            canvas.drawRoundRect(RectF(270f, 22f, 1050f, 118f), 48f, 48f, paint)
-            paint.color = Color.WHITE
-            paint.textSize = 56f
-            paint.textAlign = Paint.Align.CENTER
-            canvas.drawText("‹", 70f, 88f, paint)
-            canvas.drawText("›", 190f, 88f, paint)
-            canvas.drawText("↻", 1130f, 90f, paint)
-            paint.textSize = 42f
-            canvas.drawText(title, 660f, 84f, paint)
-            return bitmap
+        /**
+         * The white frame around a window being carried: a rounded outline a little outside it
+         * (around its bar and pill too) with a soft glow.
+         */
+        private fun grabFrame(window: VrWindow, mvp: FloatArray, w: Float, h: Float, z: Float, alpha: Float) {
+            val top = h + barHeight(window) + .04f
+            val bottom = frameBottom(window) - .03f
+            val right = w + .04f
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glUseProgram(colorProgram)
+            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(colorProgram, "uMvp"), 1, false, mvp, 0)
+            val position = GLES20.glGetAttribLocation(colorProgram, "aPosition")
+            val color = GLES20.glGetUniformLocation(colorProgram, "uColor")
+            // Glow first (wide and faint), then the line.
+            for ((thickness, strength) in listOf(.035f to .22f, .012f to .95f)) {
+                val radius = .09f
+                val outline = ArrayList<FloatArray>()
+                // Corners counter-clockwise from the top right, each an arc.
+                val corners = listOf(
+                    floatArrayOf(right - radius, top - radius, 0f), floatArrayOf(-right + radius, top - radius, 90f),
+                    floatArrayOf(-right + radius, bottom + radius, 180f), floatArrayOf(right - radius, bottom + radius, 270f),
+                )
+                for (corner in corners) for (k in 0..8) {
+                    val a = Math.toRadians((corner[2] + k * 90f / 8).toDouble())
+                    outline += floatArrayOf(corner[0], corner[1], kotlin.math.cos(a).toFloat(), kotlin.math.sin(a).toFloat())
+                }
+                val data = ArrayList<Float>(outline.size * 18)
+                for (i in outline.indices) {
+                    val a = outline[i]; val b = outline[(i + 1) % outline.size]
+                    fun o(p: FloatArray, r: Float) = floatArrayOf(p[0] + p[2] * r, p[1] + p[3] * r)
+                    val ao = o(a, radius + thickness / 2); val ai = o(a, radius - thickness / 2)
+                    val bo = o(b, radius + thickness / 2); val bi = o(b, radius - thickness / 2)
+                    data.addAll(listOf(ai[0], ai[1], z, ao[0], ao[1], z, bo[0], bo[1], z, ai[0], ai[1], z, bo[0], bo[1], z, bi[0], bi[1], z))
+                }
+                GLES20.glUniform4f(color, 1f, 1f, 1f, strength * alpha)
+                drawArray(data.toFloatArray(), GLES20.GL_TRIANGLES, position)
+            }
+        }
+
+        /** The pill under a window, as on Quest: its title, and keyboard, expand, minimize, close. */
+        private fun pill(window: VrWindow, title: String, mvp: FloatArray, h: Float, z: Float, keyboardOn: Boolean, lit: String?, held: Boolean) {
+            val pill = WindowChrome.pillWidth(window.width) * (if (held) 1.04f else 1f)
+            val back = pillBack(window)
+            val big = expanded(window)
+            val curved = window.arcDegrees > 0f
+            val texture = frameTexture("pill:${window.id}", "$title|$back|$keyboardOn|$big|$curved|$lit|${(pill * 100).toInt()}") {
+                WindowChrome.drawPill(title, WindowChrome.pillWidth(window.width), back, keyboardOn, big, curved, lit)
+            }
+            val top = -h - WindowChrome.PILL_GAP; val bottom = top - WindowChrome.PILL_H
+            val pw = pill / 2
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            quad(textureProgram, texture, mvp, floatArrayOf(-pw, bottom, z, 0f, 1f, pw, bottom, z, 1f, 1f, -pw, top, z, 0f, 0f, pw, top, z, 1f, 0f))
+        }
+
+        /** The browser's bar on top: title, tabs, navigation and the address. */
+        private fun browserBar(window: VrWindow, title: String, mvp: FloatArray, w: Float, h: Float, z: Float) {
+            val dark = Ui.dark
+            val tabs = window.content.toolbarTabs()
+            val active = window.content.toolbarTab
+            val texture = frameTexture("bar:${window.id}", "${window.content.toolbarVersion}|$title|$tabs|$active|$dark") {
+                WindowChrome.drawBar(title, tabs, active, dark)
+            }
+            val top = h + barHeight(window)
+            quad(textureProgram, texture, mvp, floatArrayOf(-w, h, z, 0f, 1f, w, h, z, 1f, 1f, -w, top, z, 0f, 0f, w, top, z, 1f, 0f))
         }
 
         /**
          * The user's hands as see-through white shapes over the passthrough, and the cursor on the
          * aim point. Drawn in head space with the passthrough's own mapping, so they sit on the real hands.
          */
-        /**
-         * The play-area boundary: while tracing, the path walked so far; afterwards blue walls that
-         * fade in near the edge, and a warning in front of the eyes once outside.
-         */
-        private fun drawBoundary(position: FloatArray) {
-            if (ar == null) return
-            val tracing = boundary.tracing
-            val outline = boundary.outline
-            if (tracing == null && outline.size < 6) return
-            Matrix.multiplyMM(mvp, 0, projection, 0, view, 0)
-            GLES20.glUseProgram(colorProgram)
-            GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(colorProgram, "uMvp"), 1, false, mvp, 0)
-            val location = GLES20.glGetAttribLocation(colorProgram, "aPosition")
-            // Keep the trail above the estimated floor so it remains visible through Cardboard.
-            val floor = -1.25f
-            if (tracing != null) {
-                // The final point is the current head position, so the blue line visibly follows
-                // the user even before another 15 cm sample is committed to Boundary.
-                val live = tracing + floatArrayOf(position[0], position[2])
-                val line = FloatArray(live.size / 2 * 3) { i -> when (i % 3) { 0 -> live[i / 3 * 2]; 1 -> floor; else -> live[i / 3 * 2 + 1] } }
-                GLES20.glUniform4f(GLES20.glGetUniformLocation(colorProgram, "uColor"), .05f, .65f, 1f, 1f)
-                GLES20.glLineWidth(16f)
-                drawArray(line, GLES20.GL_LINE_STRIP, location)
-                // Keep an unmistakable marker under the user even before they have walked far
-                // enough for the first sampled segment to be stored.
-                val px = position[0]
-                val pz = position[2]
-                drawArray(floatArrayOf(
-                    px - .11f, floor, pz, px + .11f, floor, pz,
-                    px, floor, pz - .11f, px, floor, pz + .11f,
-                ), GLES20.GL_LINES, location)
-                // A head-locked finish pill follows the user; pinching anywhere activates it.
-                banner(tracingTexture, -.62f)
-                return
-            }
-            val inside = boundary.contains(position[0], position[2])
-            val distance = boundary.distance(position[0], position[2])
-            boundaryWarning = !inside
-            val strength = if (!inside) 1f else ((Boundary.WARN_DISTANCE - distance) / Boundary.WARN_DISTANCE).coerceIn(0f, 1f)
-            if (strength <= 0f) return
-            val walls = ArrayList<Float>()
-            val grid = ArrayList<Float>()
-            var j = outline.size - 2
-            var i = 0
-            while (i < outline.size) {
-                val ax = outline[j]; val az = outline[j + 1]; val bx = outline[i]; val bz = outline[i + 1]
-                val bottom = Boundary.WALL_BOTTOM; val top = Boundary.WALL_TOP
-                walls += listOf(ax, bottom, az, bx, bottom, bz, bx, top, bz, ax, bottom, az, bx, top, bz, ax, top, az)
-                // A grid on the wall: vertical lines every 25 cm, horizontal every 30 cm.
-                val length = hypot(bx - ax, bz - az)
-                val steps = (length / .25f).toInt().coerceAtLeast(1)
-                for (k in 0..steps) {
-                    val t = k.toFloat() / steps
-                    val x = ax + (bx - ax) * t; val z = az + (bz - az) * t
-                    grid += listOf(x, bottom, z, x, top, z)
-                }
-                var y = bottom
-                while (y <= top) {
-                    grid += listOf(ax, y, az, bx, y, bz)
-                    y += .3f
-                }
-                j = i
-                i += 2
-            }
-            GLES20.glUniform4f(GLES20.glGetUniformLocation(colorProgram, "uColor"), .2f, .55f, 1f, .18f * strength)
-            drawArray(walls.toFloatArray(), GLES20.GL_TRIANGLES, location)
-            GLES20.glUniform4f(GLES20.glGetUniformLocation(colorProgram, "uColor"), .45f, .8f, 1f, .75f * strength)
-            GLES20.glLineWidth(3f)
-            drawArray(grid.toFloatArray(), GLES20.GL_LINES, location)
-            if (!inside) banner(warningTexture, 0f)
-        }
-
         /** A message fixed in front of the eyes at height [y] (head space, tangent units). */
         private fun banner(texture: Int, y: Float) {
             val head = FloatArray(16)
@@ -2076,6 +3016,10 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             GLES20.glUseProgram(colorProgram)
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(colorProgram, "uMvp"), 1, false, mvp, 0)
             val position = GLES20.glGetAttribLocation(colorProgram, "aPosition")
+            drawHandSkeletons(position)
+            // The cursor: the hand's aim point.
+            mouseCursor(position)
+            drawBeam(position)
             val point = pinchPoint ?: return
             val x = (point[0] - .5f) * 2f * viewScaleX
             val y = (.5f - point[1]) * 2f * viewScaleY
@@ -2085,6 +3029,303 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             disc(x, y, r * 1.45f, position)
             GLES20.glUniform4f(GLES20.glGetUniformLocation(colorProgram, "uColor"), 1f, 1f, 1f, 1f)
             disc(x, y, r, position)
+        }
+
+        /**
+         * The pointer as on Quest: no line — a small white drop by the hand, pointing where the ray
+         * goes (shorter and rounder while pinching), and a thin hollow ring where the ray meets the
+         * home or a window. The ring inverts what is under it, so it shows on white pages too.
+         * The drop sits at the hands' depth and the ring at the target's, so neither doubles.
+         */
+        private fun drawBeam(position: Int) {
+            if (mouseActive()) return
+            otherBeam?.let { drawBeam(it, false, position) }
+            beam?.let { drawBeam(it, pressing, position) }
+        }
+
+        /**
+         * A hand's pointer, as on Quest: by the hand a big white drop (about a little finger's size)
+         * pointing where the ray goes; while clicking it stretches into a stick, and only then a
+         * line runs from it towards the target. A small ring shows where the ray meets the home or
+         * a window. The drop sits on the hands' plane (1 m) and the ring at the target's depth, so
+         * neither doubles.
+         */
+        private fun drawBeam(b: FloatArray, down: Boolean, position: Int) {
+            val color = GLES20.glGetUniformLocation(colorProgram, "uColor")
+            if (b[2] < -.05f) {
+                val hx = b[0] / -b[2]; val hy = b[1] / -b[2]
+                val tx = b[3] / -b[5]; val ty = b[4] / -b[5]
+                var dx = tx - hx; var dy = ty - hy
+                val l = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (l > 1e-4f) { dx /= l; dy /= l } else { dx = 0f; dy = 1f }
+                val shape = ArrayList<Float>(96 * 3)
+                val sx: Float; val sy: Float
+                if (!down) {
+                    // The drop: a round end at the hand and a point towards the target.
+                    val r = CURSOR_R
+                    val tip = CURSOR_R * .9f
+                    handDisc(shape, hx, hy, r)
+                    shape.addAll(listOf(hx - dy * r, hy + dx * r, -1f, hx + dy * r, hy - dx * r, -1f, hx + dx * (r + tip), hy + dy * (r + tip), -1f))
+                    GLES20.glUniform4f(color, .95f, .95f, .97f, .9f)
+                    drawArray(shape.toFloatArray(), GLES20.GL_TRIANGLES, position)
+                    sx = hx; sy = hy
+                } else {
+                    // Clicking: a stick along the ray, rounded at both ends.
+                    val w = CURSOR_R * .45f
+                    val len = CURSOR_R * 2f
+                    val ex = hx + dx * len; val ey = hy + dy * len
+                    handBone(shape, hx, hy, ex, ey, w, w)
+                    handDisc(shape, hx, hy, w)
+                    handDisc(shape, ex, ey, w)
+                    GLES20.glUniform4f(color, 1f, 1f, 1f, .95f)
+                    drawArray(shape.toFloatArray(), GLES20.GL_TRIANGLES, position)
+                    sx = ex; sy = ey
+                }
+                if (down) {
+                    // The line, only while clicking: from the stick's end, fading out before the target.
+                    val sz = -1f
+                    val ex = b[3]; val ey = b[4]; val ez = b[5]
+                    fun across(px: Float, py: Float, pz: Float, width: Float): FloatArray {
+                        val lx = ex - sx; val ly = ey - sy; val lz = ez - sz
+                        var cx = ly * pz - lz * py; var cy = lz * px - lx * pz; var cz = lx * py - ly * px
+                        val cl = kotlin.math.sqrt(cx * cx + cy * cy + cz * cz).coerceAtLeast(1e-6f)
+                        cx = cx / cl * width; cy = cy / cl * width; cz = cz / cl * width
+                        return floatArrayOf(cx, cy, cz)
+                    }
+                    val segments = 10
+                    for (k in 0 until segments) {
+                        val t0 = k / segments.toFloat() * RAY_SHOWN; val t1 = (k + 1) / segments.toFloat() * RAY_SHOWN
+                        val ax = sx + (ex - sx) * t0; val ay = sy + (ey - sy) * t0; val az = sz + (ez - sz) * t0
+                        val bx = sx + (ex - sx) * t1; val by = sy + (ey - sy) * t1; val bz = sz + (ez - sz) * t1
+                        val wa = across(ax, ay, az, .006f)
+                        val wb = across(bx, by, bz, .006f)
+                        GLES20.glUniform4f(color, 1f, 1f, 1f, .85f * (1f - t0 / RAY_SHOWN * .9f))
+                        drawArray(floatArrayOf(
+                            ax - wa[0], ay - wa[1], az - wa[2], ax + wa[0], ay + wa[1], az + wa[2], bx + wb[0], by + wb[1], bz + wb[2],
+                            ax - wa[0], ay - wa[1], az - wa[2], bx + wb[0], by + wb[1], bz + wb[2], bx - wb[0], by - wb[1], bz - wb[2],
+                        ), GLES20.GL_TRIANGLES, position)
+                    }
+                }
+            }
+            if (b[6] < .5f) return
+            // The ring: small, white inverted over what is behind it, empty inside.
+            val depth = -b[5]
+            // A small point for precise aiming, a little smaller still while pressing.
+            val outer = (if (down || touching) .009f else .012f) * depth
+            val inner = outer - .005f * depth
+            GLES20.glBlendFunc(GLES20.GL_ONE_MINUS_DST_COLOR, GLES20.GL_ZERO)
+            GLES20.glUniform4f(color, 1f, 1f, 1f, 1f)
+            ring3d(b[3], b[4], b[5], outer, inner, position)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        }
+
+        /** A thin ring facing the eye at a point in head space, from [inner] to [outer] radius. */
+        private fun ring3d(x: Float, y: Float, z: Float, outer: Float, inner: Float, position: Int) {
+            val steps = 40
+            val data = FloatArray(steps * 18)
+            for (k in 0 until steps) {
+                val a0 = (k * 2 * Math.PI / steps).toFloat(); val a1 = ((k + 1) * 2 * Math.PI / steps).toFloat()
+                val c0 = kotlin.math.cos(a0); val s0 = kotlin.math.sin(a0); val c1 = kotlin.math.cos(a1); val s1 = kotlin.math.sin(a1)
+                val o = k * 18
+                floatArrayOf(
+                    x + c0 * inner, y + s0 * inner, z, x + c0 * outer, y + s0 * outer, z, x + c1 * outer, y + s1 * outer, z,
+                    x + c0 * inner, y + s0 * inner, z, x + c1 * outer, y + s1 * outer, z, x + c1 * inner, y + s1 * inner, z,
+                ).copyInto(data, o)
+            }
+            drawArray(data, GLES20.GL_TRIANGLES, position)
+        }
+
+        /**
+         * The mouse pointer, an arrow in the air: along the mouse's direction, as far away as the
+         * windows, so it sits on what it points at.
+         */
+        private fun mouseCursor(position: Int) {
+            if (!mouseActive()) return
+            val direction = mouseDirection() ?: return
+            val far = floatArrayOf(direction[0] * windowRadius, direction[1] * windowRadius, direction[2] * windowRadius, 0f)
+            val local = FloatArray(4)
+            // Rotation only: the pointer starts at the eyes, wherever the head is.
+            Matrix.multiplyMV(local, 0, worldToHead, 0, far, 0)
+            if (local[2] >= -.05f) return
+            val x = local[0] / -local[2]
+            val y = local[1] / -local[2]
+            val size = if (mouseDown) .026f else .03f
+            fun arrow(grow: Float) = floatArrayOf(
+                x - grow * .6f, y + grow, -1f,
+                x - grow * .6f, y - size - grow * 1.6f, -1f,
+                x + size * .72f + grow * 1.6f, y - size * .62f - grow, -1f,
+            )
+            GLES20.glUniform4f(GLES20.glGetUniformLocation(colorProgram, "uColor"), 0f, 0f, 0f, .7f)
+            drawArray(arrow(.004f), GLES20.GL_TRIANGLES, position)
+            GLES20.glUniform4f(GLES20.glGetUniformLocation(colorProgram, "uColor"), 1f, 1f, 1f, 1f)
+            drawArray(arrow(0f), GLES20.GL_TRIANGLES, position)
+        }
+
+        /**
+         * The tracked hands as Horizon-style hands over the real ones: a see-through dark silhouette
+         * with a thin light outline, cut at the wrist. The outline turns white and bolder while a pinch
+         * clicks. With a stencil every pixel of a hand is drawn once, so the see-through fill is even.
+         */
+        private fun drawHandSkeletons(position: Int) {
+            val hands = handPoints
+            if (hands.isEmpty()) return
+            val color = GLES20.glGetUniformLocation(colorProgram, "uColor")
+            val pinching = pinch.pinching
+            if (hasStencil) {
+                // A pixel passes only while its stencil is 0, and is then marked 1: drawn once.
+                GLES20.glEnable(GLES20.GL_STENCIL_TEST)
+                GLES20.glStencilMask(0xFF)
+                GLES20.glStencilFunc(GLES20.GL_GREATER, 1, 0xFF)
+                GLES20.glStencilOp(GLES20.GL_KEEP, GLES20.GL_KEEP, GLES20.GL_REPLACE)
+            }
+            for (hand in hands) {
+                fun x(i: Int) = (hand[i * 3] - .5f) * 2f * viewScaleX
+                fun y(i: Int) = (.5f - hand[i * 3 + 1]) * 2f * viewScaleY
+                val palm = hypot(x(9) - x(0), y(9) - y(0))
+                if (palm < 1e-4f) continue
+                val r = palm * .12f
+                val edge = if (pinching) maxOf(palm * .035f, .003f) else maxOf(palm * .018f, .0016f)
+                // With a stencil: fill first (it marks its pixels), then the outline only where the
+                // fill is not. Without one: the outline first and the solid fill over it.
+                for (pass in 0..1) {
+                    val outline = if (hasStencil) pass == 1 else pass == 0
+                    val grow = if (outline) edge else 0f
+                    val shape = ArrayList<Float>(4096)
+                    fun disc(i: Int, radius: Float) = handDisc(shape, x(i), y(i), radius + grow)
+                    fun bone(i: Int, j: Int, ri: Float, rj: Float) {
+                        handBone(shape, x(i), y(i), x(j), y(j), ri + grow, rj + grow)
+                        disc(i, ri); disc(j, rj)
+                    }
+                    // The palm: a fan over its outline, its sides rounded by bones.
+                    val ring = intArrayOf(0, 1, 2, 5, 9, 13, 17)
+                    var cx = 0f; var cy = 0f
+                    for (i in ring) { cx += x(i); cy += y(i) }
+                    cx /= ring.size; cy /= ring.size
+                    for (k in ring.indices) {
+                        val i = ring[k]; val j = ring[(k + 1) % ring.size]
+                        shape.addAll(listOf(cx, cy, -1f, x(i), y(i), -1f, x(j), y(j), -1f))
+                    }
+                    bone(0, 1, r * 1.1f, r * 1.15f)
+                    bone(0, 17, r * 1.1f, r * .9f)
+                    bone(2, 5, r * .7f, r * 1f)
+                    bone(5, 9, r, r); bone(9, 13, r, r); bone(13, 17, r * .95f, r * .9f)
+                    // Thumb and fingers, thinner towards the tips.
+                    val scale = floatArrayOf(1f, 1f, 1.03f, .97f, .85f)
+                    for (finger in 0 until 5) {
+                        val base = 1 + finger * 4
+                        val f = scale[finger]
+                        if (finger == 0) {
+                            bone(1, 2, r * 1.15f, r * 1.02f); bone(2, 3, r * 1.02f, r * .95f); bone(3, 4, r * .95f, r * .82f)
+                        } else {
+                            bone(base, base + 1, r * f, r * .92f * f)
+                            bone(base + 1, base + 2, r * .92f * f, r * .85f * f)
+                            bone(base + 2, base + 3, r * .85f * f, r * .76f * f)
+                        }
+                    }
+                    when {
+                        outline && pinching -> GLES20.glUniform4f(color, 1f, 1f, 1f, 1f)
+                        outline -> GLES20.glUniform4f(color, .78f, .79f, .84f, .9f)
+                        // Without a stencil overlaps would darken, so the fill is then solid.
+                        else -> GLES20.glUniform4f(color, .09f, .09f, .16f, if (hasStencil) .62f else 1f)
+                    }
+                    drawArray(shape.toFloatArray(), GLES20.GL_TRIANGLES, position)
+                }
+            }
+            if (hasStencil) GLES20.glDisable(GLES20.GL_STENCIL_TEST)
+        }
+
+        /** Rain drops around the user: x, z, where in the fall, speed. */
+        private val drops = FloatArray(RAIN_DROPS * 4).also { d ->
+            val random = java.util.Random(7)
+            for (i in 0 until RAIN_DROPS) {
+                val angle = random.nextFloat() * 2f * Math.PI.toFloat()
+                val distance = .6f + random.nextFloat() * 4.4f
+                d[i * 4] = kotlin.math.cos(angle) * distance
+                d[i * 4 + 1] = kotlin.math.sin(angle) * distance
+                d[i * 4 + 2] = random.nextFloat()
+                d[i * 4 + 3] = 5f + random.nextFloat() * 3f
+            }
+        }
+
+        private val fullView = floatArrayOf(-1f, -1f, 0f, 1f, -1f, 0f, -1f, 1f, 0f, 1f, -1f, 0f, 1f, 1f, 0f, -1f, 1f, 0f)
+
+        /**
+         * Room brightness, fog and rain from the sliders under the worlds: a dark veil, a pale haze
+         * over the whole view, and streaks of rain falling around the user ([head] is where the
+         * head is in the room, so the rain stays around them in 6DoF).
+         */
+        private fun atmosphere(world: FloatArray, head: FloatArray) {
+            val dim = 1f - roomBrightness
+            val fog = fogLevel
+            val rain = rainLevel
+            if (dim < .01f && fog < .01f && rain < .01f) return
+            val depth = GLES20.glIsEnabled(GLES20.GL_DEPTH_TEST)
+            GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+            GLES20.glUseProgram(colorProgram)
+            val color = GLES20.glGetUniformLocation(colorProgram, "uColor")
+            val matrix = GLES20.glGetUniformLocation(colorProgram, "uMvp")
+            val position = GLES20.glGetAttribLocation(colorProgram, "aPosition")
+            if (dim > .01f) {
+                GLES20.glUniformMatrix4fv(matrix, 1, false, identity, 0)
+                GLES20.glUniform4f(color, 0f, 0f, 0f, dim)
+                drawArray(fullView, GLES20.GL_TRIANGLES, position)
+            }
+            if (rain > .01f) {
+                val count = (RAIN_DROPS * rain).toInt().coerceAtLeast(1)
+                val seconds = (SystemClock.elapsedRealtime() % 100_000L) / 1000f
+                val lines = FloatArray(count * 6)
+                for (i in 0 until count) {
+                    val x = head[0] + drops[i * 4]
+                    val z = head[2] + drops[i * 4 + 1]
+                    val fall = ((drops[i * 4 + 2] + seconds * drops[i * 4 + 3] / RAIN_HEIGHT) % 1f)
+                    val y = head[1] + 2.2f - fall * RAIN_HEIGHT
+                    lines[i * 6] = x; lines[i * 6 + 1] = y; lines[i * 6 + 2] = z
+                    lines[i * 6 + 3] = x; lines[i * 6 + 4] = y - .22f; lines[i * 6 + 5] = z
+                }
+                GLES20.glUniformMatrix4fv(matrix, 1, false, world, 0)
+                GLES20.glUniform4f(color, .82f, .87f, .95f, .35f + .3f * rain)
+                GLES20.glLineWidth(3f)
+                drawArray(lines, GLES20.GL_LINES, position)
+                // Rain also greys the air a little.
+                GLES20.glUniformMatrix4fv(matrix, 1, false, identity, 0)
+                GLES20.glUniform4f(color, .3f, .33f, .38f, .18f * rain)
+                drawArray(fullView, GLES20.GL_TRIANGLES, position)
+            }
+            if (fog > .01f) {
+                GLES20.glUniformMatrix4fv(matrix, 1, false, identity, 0)
+                GLES20.glUniform4f(color, .8f, .82f, .85f, .72f * fog)
+                drawArray(fullView, GLES20.GL_TRIANGLES, position)
+            }
+            if (depth) GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        }
+
+        /** A filled circle as triangles, added to [out]. */
+        private fun handDisc(out: ArrayList<Float>, x: Float, y: Float, r: Float) {
+            val segments = 14
+            for (k in 0 until segments) {
+                val a0 = (k * 2 * Math.PI / segments).toFloat()
+                val a1 = ((k + 1) * 2 * Math.PI / segments).toFloat()
+                out.addAll(listOf(
+                    x, y, -1f,
+                    x + kotlin.math.cos(a0) * r, y + kotlin.math.sin(a0) * r, -1f,
+                    x + kotlin.math.cos(a1) * r, y + kotlin.math.sin(a1) * r, -1f,
+                ))
+            }
+        }
+
+        /** A tapered band from (x1, y1) to (x2, y2), [r1] and [r2] wide on either side, added to [out]. */
+        private fun handBone(out: ArrayList<Float>, x1: Float, y1: Float, x2: Float, y2: Float, r1: Float, r2: Float) {
+            val length = hypot(x2 - x1, y2 - y1)
+            if (length < 1e-6f) return
+            val nx = -(y2 - y1) / length
+            val ny = (x2 - x1) / length
+            val ax = x1 + nx * r1; val ay = y1 + ny * r1
+            val bx = x1 - nx * r1; val by = y1 - ny * r1
+            val cx = x2 + nx * r2; val cy = y2 + ny * r2
+            val dx = x2 - nx * r2; val dy = y2 - ny * r2
+            out.addAll(listOf(ax, ay, -1f, bx, by, -1f, cx, cy, -1f, bx, by, -1f, dx, dy, -1f, cx, cy, -1f))
         }
 
         /** Where a point of the eye's view (0..1, y down) is in ARCore's camera texture. */
@@ -2137,6 +3378,36 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, data.size / 5)
         }
 
+        /** The buttons on palms turned to the face: a white disc, ∞ on the right hand, ☰ on the left. */
+        private fun drawPalmButtons(position: Int) {
+            val color = GLES20.glGetUniformLocation(colorProgram, "uColor")
+            for (button in palmButtons) {
+                val r = button.radius
+                GLES20.glUniform4f(color, 0f, 0f, 0f, .35f)
+                disc(button.x, button.y - r * .08f, r * 1.12f, position)
+                GLES20.glUniform4f(color, 1f, 1f, 1f, .96f)
+                disc(button.x, button.y, r, position)
+                GLES20.glUniform4f(color, .12f, .12f, .14f, 1f)
+                if (button.left) {
+                    for (k in -1..1) {
+                        val y = button.y + k * r * .32f
+                        drawArray(floatArrayOf(
+                            button.x - r * .45f, y - r * .07f, -1f, button.x + r * .45f, y - r * .07f, -1f, button.x + r * .45f, y + r * .07f, -1f,
+                            button.x - r * .45f, y - r * .07f, -1f, button.x + r * .45f, y + r * .07f, -1f, button.x - r * .45f, y + r * .07f, -1f,
+                        ), GLES20.GL_TRIANGLES, position)
+                    }
+                } else {
+                    // ∞: two rings side by side.
+                    for (side in floatArrayOf(-1f, 1f)) {
+                        GLES20.glUniform4f(color, .12f, .12f, .14f, 1f)
+                        disc(button.x + side * r * .3f, button.y, r * .32f, position)
+                        GLES20.glUniform4f(color, 1f, 1f, 1f, 1f)
+                        disc(button.x + side * r * .3f, button.y, r * .17f, position)
+                    }
+                }
+            }
+        }
+
         private fun disc(x: Float, y: Float, r: Float, position: Int) {
             val data = FloatArray(3 * 18) { i ->
                 val k = i / 3
@@ -2160,6 +3431,45 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uTexture"), 0)
             GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "uMvp"), 1, false, matrix, 0)
             draw(program, data, true)
+        }
+
+        private var captureBuffer = 0
+        private var captureTexture = 0
+        private var captureSize = 0 to 0
+
+        /** A window's picture read back from its texture (for the Mac remote), at most [maxWidth] wide. */
+        fun capture(window: VrWindow, maxWidth: Int): Bitmap? {
+            val texture = textures[window.id] ?: return null
+            val w = minOf(maxWidth, window.content.pixelWidth)
+            val h = (w.toLong() * window.content.pixelHeight / window.content.pixelWidth).toInt().coerceAtLeast(1)
+            if (captureSize != w to h) {
+                if (captureTexture != 0) GLES20.glDeleteTextures(1, intArrayOf(captureTexture), 0)
+                if (captureBuffer != 0) GLES20.glDeleteFramebuffers(1, intArrayOf(captureBuffer), 0)
+                captureTexture = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, captureTexture)
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, w, h, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+                captureBuffer = IntArray(1).also { GLES20.glGenFramebuffers(1, it, 0) }[0]
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, captureBuffer)
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, captureTexture, 0)
+                captureSize = w to h
+            }
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, captureBuffer)
+            GLES20.glViewport(0, 0, w, h)
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            val external = window.content.external
+            quad(if (external) externalProgram else textureProgram, texture, identity,
+                floatArrayOf(-1f, -1f, 0f, 0f, 1f, 1f, -1f, 0f, 1f, 1f, -1f, 1f, 0f, 0f, 0f, 1f, 1f, 0f, 1f, 0f), external)
+            val pixels = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
+            GLES20.glReadPixels(0, 0, w, h, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            val raw = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            pixels.rewind()
+            raw.copyPixelsFromBuffer(pixels)
+            // GL reads from the bottom row up.
+            val upright = Bitmap.createBitmap(raw, 0, 0, w, h, android.graphics.Matrix().apply { preScale(1f, -1f) }, false)
+            if (upright !== raw) raw.recycle()
+            return upright
         }
 
         /** Draws a mesh of textured triangles, which a quad's two-triangle strip cannot hold. */
@@ -2196,42 +3506,32 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             val bitmap = Bitmap.createBitmap(900, 120, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-            paint.color = Color.argb(220, 44, 44, 50)
+            val look = Glass(Ui.dark)
+            look.fill(paint, 0f, 120f)
             canvas.drawRoundRect(RectF(0f, 0f, 900f, 120f), 60f, 60f, paint)
-            paint.color = Color.rgb(75, 75, 82)
+            paint.shader = null
+            paint.color = look.faint
             canvas.drawRect(299f, 18f, 301f, 102f, paint); canvas.drawRect(599f, 18f, 601f, 102f, paint)
-            paint.color = Color.WHITE; paint.textAlign = Paint.Align.CENTER; paint.textSize = 54f
+            paint.color = look.ink; paint.textAlign = Paint.Align.CENTER; paint.textSize = 54f
             canvas.drawText("− ширина", 150f, 78f, paint)
             canvas.drawText("+ ширина", 450f, 78f, paint)
             canvas.drawText("изгиб 360°", 750f, 78f, paint)
             return bitmap
         }
 
-        private fun drawControls(): Bitmap {
-            val bitmap = Bitmap.createBitmap(640, 128, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-            paint.color = Color.argb(170, 60, 60, 66)
-            canvas.drawCircle(64f, 64f, 56f, paint)
-            canvas.drawCircle(448f, 64f, 56f, paint)
-            paint.color = Color.argb(215, 255, 255, 255)
-            canvas.drawRoundRect(RectF(136f, 44f, 376f, 84f), 20f, 20f, paint)
+    }
+
+    /** The Horizon glass for the canvas-drawn bits of windows: white or dark, with ink. */
+    private class Glass(dark: Boolean) {
+        val top = if (dark) Color.argb(240, 43, 47, 54) else Color.argb(247, 255, 255, 255)
+        val bottom = if (dark) Color.argb(240, 29, 32, 38) else Color.argb(247, 242, 242, 242)
+        val ink = if (dark) Color.rgb(242, 242, 242) else Color.rgb(39, 39, 39)
+        val faint = if (dark) Color.argb(30, 242, 242, 242) else Color.argb(26, 39, 39, 39)
+        val edge = if (dark) Color.argb(50, 255, 255, 255) else Color.argb(20, 39, 39, 39)
+        fun fill(paint: Paint, from: Float, to: Float) {
+            // A shader still takes the paint's alpha: full, or the glass turns see-through.
             paint.color = Color.WHITE
-            paint.strokeWidth = 9f
-            paint.strokeCap = Paint.Cap.ROUND
-            canvas.drawLine(40f, 64f, 88f, 64f, paint)
-            canvas.drawLine(426f, 42f, 470f, 86f, paint)
-            canvas.drawLine(470f, 42f, 426f, 86f, paint)
-            paint.color = Color.argb(170, 60, 60, 66)
-            canvas.drawCircle(576f, 64f, 56f, paint)
-            paint.color = Color.WHITE
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 6f
-            canvas.drawRoundRect(RectF(540f, 44f, 612f, 86f), 8f, 8f, paint)
-            paint.style = Paint.Style.FILL
-            for (row in 0..1) for (column in 0..3) canvas.drawCircle(551f + column * 16.5f, 56f + row * 12f, 3.5f, paint)
-            canvas.drawLine(556f, 79f, 596f, 79f, paint)
-            return bitmap
+            paint.shader = android.graphics.LinearGradient(0f, from, 0f, to, top, bottom, android.graphics.Shader.TileMode.CLAMP)
         }
     }
 
@@ -2240,48 +3540,91 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         const val MINECRAFT = "com.mojang.minecraftpe"
         private const val ID_BROWSER = "own:browser"
         private const val ID_STORE = "own:store"
+        private const val SHARED_WINDOW = "shared"
+        private const val EGG_WINDOW = "egg"
+        private const val ID_INSTAGRAM = "own:instagram"
+        private const val ID_DISCORD = "own:discord"
+        private const val ID_PEOPLE = "own:people"
         private const val ID_PHOTOS = "own:photos"
         private const val ID_MINECRAFT = "own:minecraft"
         private const val MENU_RECENTER = "menu:recenter"
         private const val MENU_HOME = "menu:home"
         private const val MENU_EXIT = "menu:exit"
         private const val MENU_PHOTO = "menu:photo"
+        private const val MENU_MUTE = "menu:mute"
+        private const val MENU_RECORD = "menu:record"
+        private const val MENU_PASSTHROUGH = "menu:passthrough"
         private const val MENU_TOGGLE_APPS = "menu:toggle-apps"
-        private const val MENU_BOUNDARY = "menu:boundary"
         private const val ID_DESKTOP = "desktop"
-        private const val DIRECT_TOUCH_PALM = .17f
-        private const val REQUEST_PERSONA = 42
+        /** MediaPipe hand bones as pairs of landmark indices. */
+        /** Grab zone of a window: this far inside its left/right edge and this far outside. */
+        private const val SIDE_INSIDE = .06f
+        private const val SIDE_OUTSIDE = .16f
         private const val ID_SETTINGS = "own:settings"
         private const val ID_ANDROID = "own:android"
-        private const val ID_CALLS = "own:calls"
-        private const val ID_ELIX = "own:elix"
-        private const val LONG_PRESS_MS = 700L
-        private const val ID_PERSONA = "own:persona"
-        private const val ID_LEOS = "own:leos"
+        /** Where the hand rays come from, as seen on the view (tangents): the shoulders, low down. */
+        private const val SHOULDER_X = .45f
+        private const val SHOULDER_Y = -1f
+        /** How far past the hand the ray leads, as a share of the shoulder–hand line. */
+        private const val RAY_LEAD = .25f
+        /** How much of the way to its target the drawn ray goes before it has faded out. */
+        private const val RAY_SHOWN = .55f
+        private const val NECK_UP = .075f
+        private const val NECK_FORWARD = .08f
+        /** Rain and fog below this share of their sliders are off. */
+        private const val OFF_BELOW = .05f
+        /** Radius of the cursor by the hand, on the hands' plane (about a little finger's width). */
+        private const val CURSOR_R = .016f
+        /** Direct touch: NEAR within this of a window's plane (metres), FAR again past [NEAR_EXIT]. */
+        private const val NEAR_DISTANCE = .15f
+        /** Farther than this from the eyes a fingertip never touches a window directly, metres. */
+        private const val ARM_REACH = .7f
+        private const val NEAR_EXIT = .20f
+        /** How far a finger may go through a window and still be touching it. */
+        private const val NEAR_BEHIND = .12f
+        /** How far outside a window's edges NEAR starts, and how far it lasts. */
+        private const val NEAR_MARGIN_IN = .03f
+        private const val NEAR_MARGIN_OUT = .07f
+        /** The finger is down within this of the surface, and up again only past [TOUCH_OUT]. */
+        private const val TOUCH_IN = .012f
+        private const val TOUCH_OUT = .035f
+        /** How much of each new fingertip reading is taken (the rest is the smoothed value). */
+        private const val TOUCH_SMOOTHING = .45f
+        /** Radians of pointer turn per mouse count. */
+        private const val MOUSE_SPEED = .0022f
+        /** After this long without the mouse, the hands point again. */
+        private const val MOUSE_IDLE_MS = 4000L
+        private const val ROOM_PREFS = "vr_room"
+        private const val RAIN_DROPS = 700
+        /** Rain falls through this many metres around the head. */
+        private const val RAIN_HEIGHT = 4.4f
         private const val KEYBOARD_W = 1.7f
         private val KEYBOARD_H = KEYBOARD_W * KeyboardPanel.HEIGHT / KeyboardPanel.WIDTH
         private const val KEYBOARD_RADIUS = 1.15f
-        private const val KEYBOARD_BUTTON_GAP = .1f
+        /** The keyboard on a table: about the size of a real one. */
+        private const val TABLE_KEYBOARD_W = .5f
+        private val TABLE_KEYBOARD_H = TABLE_KEYBOARD_W * KeyboardPanel.HEIGHT / KeyboardPanel.WIDTH
         private const val MIN_SCALE = .45f
+        /** A window made bigger with the pill's expand button. */
+        private const val EXPANDED_SCALE = 1.5f
         private const val MAX_SCALE = 2.2f
         private val recent = ArrayList<String>()
 
         /** How far the head may turn before the panel starts to follow, and how fast it catches up. */
         private const val PANEL_DEAD_ZONE = 16f
         private const val PANEL_CATCH_UP = .06f
+        /** Car mode: how far the head may look away before the view follows, and how gently. */
+        private const val CAR_DEAD_ZONE = 22f
+        private const val CAR_CATCH_UP = .035f
         private const val PANEL_SWIPE_SLOP = .04f
         private const val PANEL_SWIPE_THRESHOLD = .12f
         private const val PANEL_RADIUS = 1.7f
+        /** See [distanceScale]. */
+        private const val SIX_DOF_DISTANCE = 1.28f
+        private const val THREE_DOF_DISTANCE = .8f
         private const val PANEL_WIDTH = 2.2f
         private val PANEL_HEIGHT = PANEL_WIDTH * HomePanel.HEIGHT / HomePanel.WIDTH
-        private const val BAR_OFFSET = .07f
-        private const val BUTTON_X = .3f
         private const val CORNER_RADIUS = .06f
-        private const val TOOLBAR_W = .95f
-        private val TOOLBAR_H = TOOLBAR_W * 140f / 1200f
-        private const val TOOLBAR_GAP = .03f
-        /** Share of the bar width taken by each button at its ends. */
-        private const val TOOLBAR_BUTTON = .1f
 
         private const val TEXTURE_VERTEX = """
             uniform mat4 uMvp;
@@ -2298,14 +3641,20 @@ class VrHomeActivity : Activity(), LifecycleOwner {
          * Pre-warps each half of the stereo texture so a simple Cardboard lens straightens it.
          * Separate RGB radii also remove most of the coloured fringe near inexpensive lens edges.
          */
+        /**
+         * Cardboard lenses: the same gentle barrel warp around each eye's centre that PhoneXR always
+         * used (its halves line up in the viewer), but each eye keeps its rectangle — no round mask.
+         */
         private const val CARDBOARD_FRAGMENT = """
             precision highp float;
             uniform sampler2D uTexture;
-            uniform float uEyeAspect;
+            // How far each eye's picture moves towards the middle of the screen, in half-screen widths.
+            uniform float uLensShift;
             varying vec2 vUv;
 
-            vec2 sourceUv(vec2 eye, float amount) {
-                vec2 p = (eye - vec2(0.5)) * 2.0;
+            // The lens warp around the lens centre [centre] (in the eye's half of the screen).
+            vec2 sourceUv(vec2 eye, vec2 centre, float amount) {
+                vec2 p = (eye - centre) * 2.0;
                 float r2 = dot(p, p);
                 p *= 1.0 + amount * r2 + 0.06 * r2 * r2;
                 return p * 0.5 + vec2(0.5);
@@ -2314,29 +3663,19 @@ class VrHomeActivity : Activity(), LifecycleOwner {
             void main() {
                 float rightEye = step(0.5, vUv.x);
                 vec2 eye = vec2(vUv.x * 2.0 - rightEye, vUv.y);
-                // Circular physical lens aperture. UV space itself is wide on a landscape phone,
-                // so x must be corrected by the per-eye viewport aspect.
-                vec2 shape = (eye - vec2(0.5)) * 2.0;
-                shape.x *= uEyeAspect;
-                float lensRadius = 0.97;
-                float edge = length(shape) / lensRadius;
-                if (edge > 1.0) {
-                    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                    return;
-                }
-                vec2 red = sourceUv(eye, 0.205);
-                vec2 green = sourceUv(eye, 0.215);
-                vec2 blue = sourceUv(eye, 0.225);
+                vec2 centre = vec2(0.5 + mix(uLensShift, -uLensShift, rightEye), 0.5);
+                vec2 red = sourceUv(eye, centre, 0.205);
+                vec2 green = sourceUv(eye, centre, 0.215);
+                vec2 blue = sourceUv(eye, centre, 0.225);
                 if (min(min(green.x, green.y), min(1.0 - green.x, 1.0 - green.y)) < 0.0) {
                     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
                     return;
                 }
                 float base = rightEye * 0.5;
-                float r = texture2D(uTexture, vec2(base + red.x * 0.5, red.y)).r;
+                float r = texture2D(uTexture, vec2(base + clamp(red.x, 0.0, 1.0) * 0.5, red.y)).r;
                 float g = texture2D(uTexture, vec2(base + green.x * 0.5, green.y)).g;
-                float b = texture2D(uTexture, vec2(base + blue.x * 0.5, blue.y)).b;
-                float vignette = 1.0 - smoothstep(0.88, 1.0, edge);
-                gl_FragColor = vec4(vec3(r, g, b) * vignette, 1.0);
+                float b = texture2D(uTexture, vec2(base + clamp(blue.x, 0.0, 1.0) * 0.5, blue.y)).b;
+                gl_FragColor = vec4(r, g, b, 1.0);
             }"""
         private const val EXTERNAL_FRAGMENT = """
             #extension GL_OES_EGL_image_external : require

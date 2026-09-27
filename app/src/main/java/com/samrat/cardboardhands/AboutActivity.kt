@@ -14,6 +14,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -27,11 +31,17 @@ import zone.ien.hig.theme.CupertinoTheme
 class AboutActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { PhoneXRTheme { About() } }
+        setContent {
+            PhoneXRTheme {
+                var egg by remember { mutableStateOf(false) }
+                if (egg) SpaceEasterEgg { egg = false } else About { egg = true }
+            }
+        }
     }
 
     @Composable
-    private fun About() {
+    private fun About(onEgg: () -> Unit) {
+        val taps = remember { VersionTaps() }
         HigPage(title = "О приложении", onBack = ::finish) {
             Column(
                 modifier = Modifier
@@ -42,34 +52,18 @@ class AboutActivity : ComponentActivity() {
             ) {
                 AppIcon()
                 CupertinoText("PhoneXR", style = CupertinoTheme.typography.title1)
+                // Five taps in a row on the version: the easter egg.
                 CupertinoText(
                     "Версия ${BuildConfig.VERSION_NAME}",
-                    color = CupertinoTheme.colorScheme.secondaryLabel
+                    color = CupertinoTheme.colorScheme.secondaryLabel,
+                    modifier = Modifier.clickable { if (taps.tap()) onEgg() }
                 )
-                CupertinoText(
-                    "VR на обычном телефоне: OpenXR через Monado, трекинг рук камерой, Joy‑Con вместо контроллеров " +
-                        "и переходник для игр Gear VR.",
-                    style = CupertinoTheme.typography.subhead,
-                    textAlign = TextAlign.Center,
-                    color = CupertinoTheme.colorScheme.secondaryLabel
-                )
-            }
-            HigSection(
-                title = "Благодарности",
-                footer = "Комната кинотеатра: «minecraft vr Living Room» от Piethekiddev (Sketchfab), лицензия CC BY 4.0."
-            ) {
-                HigLink("Модель комнаты на Sketchfab") {
-                    startActivity(
-                        Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse("https://sketchfab.com/3d-models/minecraft-vr-living-room-decef3993905402b8237708ae5af0704")
-                        )
-                    )
-                }
             }
             HigSection(title = "Команда", footer = "Made with ❤️") {
                 Person("Разработчик", "@Beketov_samrat")
                 Person("Тестировщик", "@livebradar")
+                Person("Тестировщик", "@vxtzx")
+                Person("Тестировщик", "@Kozzi042")
                 Person("Дизайнер", "@Freddytech87")
             }
         }

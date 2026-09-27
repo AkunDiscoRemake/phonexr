@@ -43,15 +43,27 @@ class JoyConTracker(context: Context) : AutoCloseable, InputManager.InputDeviceL
         handler.post { refresh() }
     }
 
-    fun pose(left: Boolean): Pose = slots[if (left) 0 else 1].snapshot()
+    /** Android's own Joy-Con sensors when the kernel has them, otherwise the root reader's gyroscope. */
+    fun pose(left: Boolean): Pose {
+        val slot = slots[if (left) 0 else 1]
+        if (slot.hasMotion) return slot.snapshot()
+        val root = RootJoyCon.pose(left) ?: return slot.snapshot()
+        return Pose(true, root.x, root.y, root.z, root.w)
+    }
 
-    /** True when this Joy-Con is paired and Android exposes a gyroscope for it. */
-    fun hasMotion(left: Boolean): Boolean = slots[if (left) 0 else 1].hasMotion
+    /** True when this Joy-Con is paired and a gyroscope for it is read (Android's or through root). */
+    fun hasMotion(left: Boolean): Boolean = slots[if (left) 0 else 1].hasMotion || RootJoyCon.pose(left) != null
 
-    fun motion(left: Boolean): Motion = slots[if (left) 0 else 1].motion()
+    fun motion(left: Boolean): Motion {
+        val slot = slots[if (left) 0 else 1]
+        val own = slot.motion()
+        if (slot.hasMotion) return own
+        val root = RootJoyCon.pose(left) ?: return own
+        return Motion(true, listOf("гироскоп (root)", "акселерометр (root)"), root.rateHz * 3, root.degreesPerSecond, own.events)
+    }
 
     /** Makes the current Joy-Con orientation the new "straight ahead". */
-    fun recenter() = handler.post { slots.forEach { it.recenter() } }
+    fun recenter() = handler.post { slots.forEach { it.recenter() }; RootJoyCon.recenter() }
 
     override fun onInputDeviceAdded(deviceId: Int) = refresh()
     override fun onInputDeviceRemoved(deviceId: Int) = refresh()

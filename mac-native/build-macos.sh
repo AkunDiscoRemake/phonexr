@@ -13,7 +13,7 @@ build_edition() {
   /bin/mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$stage"
   /usr/bin/xcrun swiftc -parse-as-library -O -module-cache-path "$OUTPUT_DIR/module-cache" \
     -target arm64-apple-macos13.0 -framework SwiftUI -framework AppKit ${(z)flag} \
-    "$SCRIPT_DIR/PhoneXRShareApp.swift" "$SCRIPT_DIR/AndroidBridge.swift" "$SCRIPT_DIR/ScreenStream.swift" \
+    "$SCRIPT_DIR/PhoneXRShareApp.swift" "$SCRIPT_DIR/AndroidBridge.swift" "$SCRIPT_DIR/ScreenStream.swift" "$SCRIPT_DIR/VrRemote.swift" \
     -o "$app/Contents/MacOS/$name"
   /bin/cp "$plist" "$app/Contents/Info.plist"
   /bin/cp "$SCRIPT_DIR/../desktop/assets/phonexr-share-icon.png" "$app/Contents/Resources/PhoneXRShare.png"

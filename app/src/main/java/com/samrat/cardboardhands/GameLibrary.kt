@@ -26,7 +26,7 @@ object GameLibrary {
 
     /** The headset a build was made for. Quest and Gear VR both draw through VrApi, so the
      *  manifest — not the library — says which one it is. */
-    enum class Headset(val title: String) { QUEST("Quest"), GEAR_VR("Gear VR"), UNKNOWN("VR‑гарнитура") }
+    enum class Headset(val title: String) { QUEST("Quest"), GEAR_VR("Gear VR"), ANDROID_XR("Android XR"), UNKNOWN("VR‑гарнитура") }
 
     data class Game(
         val packageName: String,
@@ -116,6 +116,8 @@ object GameLibrary {
      * builds name Samsung's VR mode and are 32-bit, because no 64-bit Gear VR ever existed.
      */
     fun headsetOf(markers: Set<String>, sixtyFour: Boolean): Headset = when {
+        // Android XR (Samsung Galaxy XR and others): its features and XR window properties.
+        markers.any { it.startsWith("android.software.xr.") || it.startsWith("android.window.PROPERTY_XR_") } -> Headset.ANDROID_XR
         markers.any { it.startsWith("com.oculus.supportedDevices") } -> Headset.QUEST
         markers.any { it == "com.samsung.android.vr.application.mode" } -> Headset.GEAR_VR
         markers.any { it.startsWith("com.oculus.") } -> Headset.QUEST
@@ -169,7 +171,24 @@ object GameLibrary {
         context.packageManager.getApplicationInfo(packageName, PackageManager.GET_META_DATA).metaData?.getBoolean(OWN_HAND_TRACKING) == true
     }.getOrDefault(false)
 
-    fun launchIntent(context: Context, game: Game): Intent? =
+    fun launchIntent(context: Context, game: Game): Intent? {
+        val direct = directLaunchIntent(context, game) ?: return null
+        // A headset OpenXR build that cannot see the runtime: PhoneXR Runtime starts it unpatched,
+        // granting it a URI of its own, which makes the runtime visible to the game.
+        // A VrApi game from the store: through the runtime and PhoneXR's VrApi driver, which its own
+        // libvrapi.so loader then finds.
+        val vrApi = game.kind == Kind.VRAPI_ORIGINAL && VrApiDriver.ready(context)
+        if (game.kind == Kind.OPENXR_ORIGINAL || vrApi) {
+            val component = direct.component ?: return direct
+            return Intent().setClassName(PhoneXrRuntime.PACKAGE, "org.freedesktop.monado.phonexr.GameLauncher")
+                .putExtra("component", component.flattenToString())
+                .putExtra("vrapi", vrApi)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return direct
+    }
+
+    private fun directLaunchIntent(context: Context, game: Game): Intent? =
         // Gear VR games declare MAIN + INFO instead of a launcher entry; this finds both.
         context.packageManager.getLaunchIntentForPackage(game.packageName)
             ?: vrCategories.firstNotNullOfOrNull { category ->
@@ -183,9 +202,9 @@ object GameLibrary {
     /** The line under the game's name in the list: what it is and what PhoneXR has to do with it. */
     fun describe(game: Game) = when (game.kind) {
         Kind.OPENXR -> "OpenXR"
-        Kind.OPENXR_ORIGINAL -> "${game.headset.title} · OpenXR · нужно пропатчить"
+        Kind.OPENXR_ORIGINAL -> "${game.headset.title} · OpenXR · без патча, через PhoneXR Runtime"
         Kind.VRAPI_READY -> "${game.headset.title} · через переходник PhoneXR"
-        Kind.VRAPI_ORIGINAL -> "${game.headset.title} · VrApi · нужно пропатчить"
+        Kind.VRAPI_ORIGINAL -> "${game.headset.title} · VrApi · без патча, через драйвер PhoneXR"
         Kind.VRAPI_UNSUPPORTED -> "${game.headset.title} · не поддерживается"
         Kind.DAYDREAM -> "Daydream / Cardboard"
     }

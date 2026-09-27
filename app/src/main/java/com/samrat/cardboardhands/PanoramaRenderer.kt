@@ -96,7 +96,7 @@ class PanoramaRenderer(
         val uv = GLES20.glGetAttribLocation(program, "aUv")
         for (index in 0..1) {
             Matrix.perspectiveM(projection, 0, FOV_Y, eyeWidth.toFloat() / height, .05f, 100f)
-            eyes.shift(projection, index, eyeWidth)
+            eyes.shift(projection, index)
             GLES20.glViewport(index * eyeWidth, 0, eyeWidth, height)
             // The sphere sits on the eyes, so only the turn of the head matters.
             Matrix.setIdentityM(eye, 0)

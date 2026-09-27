@@ -18,15 +18,26 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
 /**
- * Persona calls between PhoneXR accounts. Everyone signed in is "online" in a lobby (Supabase
+ * Calls between PhoneXR accounts. Everyone signed in is "online" in a lobby (Supabase
  * Realtime presence). A call is a private channel where both sides send, 20 times a second, their
- * voice (IMA ADPCM), how their mouth moves and where their hands are; the Personas themselves are
- * exchanged once at the start. No video leaves the headset — only the Persona is shown.
+ * voice (IMA ADPCM), how loud they speak and where their hands are. No video of the face leaves
+ * the headset.
  */
 object Calls {
     enum class State { OFFLINE, IDLE, CALLING, RINGING, IN_CALL }
 
-    data class Contact(val id: String, val name: String)
+    data class Contact(val id: String, val name: String, val status: String = "")
+
+    /** What we are doing, shown to friends ("В VR", "Смотрит вместе"…). */
+    @Volatile var status: String = ""
+        private set
+
+    fun setStatus(text: String) {
+        if (text == status) return
+        status = text
+        val user = me ?: return
+        realtime?.track(LOBBY, JSONObject().put("id", user.id).put("name", user.name).put("st", text))
+    }
 
     @Volatile var state = State.OFFLINE
         private set
@@ -38,8 +49,6 @@ object Calls {
     @Volatile var muted = false
 
     // What the other side sends.
-    @Volatile var remoteFace: Persona.Face? = null
-        private set
     @Volatile var remoteMouth = 0f
         private set
     @Volatile var remoteRound = .5f
@@ -68,10 +77,27 @@ object Calls {
     private val encoder = Adpcm()
     private var decoder = Adpcm()
     private val pending = ByteArrayOutputStream()
-    private val chunks = HashMap<Int, String>()
-    private var chunkPoints: String? = null
     private var greeted = false
     private var lastHandImageAt = 0L
+
+    /** The page watched together in this call, if any ([share]). */
+    @Volatile var sharedUrl: String? = null
+        private set
+    /** Called when the other person starts watching something together with us. */
+    @Volatile var onShared: ((String) -> Unit)? = null
+    /** What the other person did to the shared window. */
+    @Volatile var onRemoteInput: ((JSONObject) -> Unit)? = null
+
+    /** Opens [url] together: the other side opens the same page in its own shared window. */
+    fun share(url: String) {
+        sharedUrl = url
+        if (state == State.IN_CALL) room?.let { realtime?.broadcast(it, "app", JSONObject().put("url", url)) }
+    }
+
+    /** A touch, key or button on the shared window, for the other side to repeat. */
+    fun sendInput(input: JSONObject) {
+        if (state == State.IN_CALL) room?.let { realtime?.broadcast(it, "in", input) }
+    }
 
     fun listen(listener: () -> Unit) = listeners.add(listener)
     fun unlisten(listener: () -> Unit) = listeners.remove(listener)
@@ -88,7 +114,7 @@ object Calls {
         realtime = Realtime(token, object : Realtime.Listener {
             override fun onConnected() {
                 realtime?.join(LOBBY, user.id)
-                realtime?.track(LOBBY, JSONObject().put("id", user.id).put("name", user.name))
+                realtime?.track(LOBBY, JSONObject().put("id", user.id).put("name", user.name).put("st", status))
                 state = State.IDLE
                 changed()
             }
@@ -97,7 +123,7 @@ object Calls {
 
             override fun onPresence(topic: String, members: Map<String, JSONObject>) {
                 if (topic != LOBBY) return
-                online = members.values.map { Contact(it.optString("id"), it.optString("name")) }
+                online = members.values.map { Contact(it.optString("id"), it.optString("name"), it.optString("st")) }
                     .filter { it.id.isNotEmpty() && it.id != user.id }.distinctBy { it.id }.sortedBy { it.name.lowercase() }
                 changed()
             }
@@ -162,6 +188,7 @@ object Calls {
         endCall()
         room = null
         peer = null
+        sharedUrl = null
         message = text
         if (realtime != null) state = State.IDLE
         changed()
@@ -190,10 +217,15 @@ object Calls {
         if (topic != room) return
         when (event) {
             "hi" -> {
-                sendPersona()
                 if (!greeted) { greeted = true; realtime?.broadcast(topic, "hi", JSONObject()) }
+                // Someone who joins late gets what is being watched.
+                sharedUrl?.let { realtime?.broadcast(topic, "app", JSONObject().put("url", it)) }
             }
-            "persona" -> receivePersona(payload)
+            "app" -> payload.optString("url").takeIf { it.isNotEmpty() && it != sharedUrl }?.let { url ->
+                sharedUrl = url
+                onShared?.invoke(url)
+            }
+            "in" -> onRemoteInput?.invoke(payload)
             "s" -> {
                 remoteMouth = payload.optDouble("m", 0.0).toFloat()
                 remoteRound = payload.optDouble("r", .5).toFloat()
@@ -214,13 +246,11 @@ object Calls {
         val topic = room ?: return
         val ctx = context ?: return
         state = State.IN_CALL
-        remoteFace = null
         greeted = false
-        chunks.clear()
         decoder = Adpcm()
         realtime?.join(topic)
         realtime?.broadcast(topic, "hi", JSONObject())
-        // Our voice: the same cleaned microphone the Persona's mouth uses.
+        // Our voice: the same cleaned microphone the avatar's mouth uses.
         val v = VoiceHub.acquire(ctx)
         voice = v
         v.onPcm = { frame, count -> synchronized(pending) { pending.write(encoder.encode(frame, count)) } }
@@ -245,7 +275,6 @@ object Calls {
         track = null
         context?.let { (it.getSystemService(Context.AUDIO_SERVICE) as AudioManager).mode = AudioManager.MODE_NORMAL }
         room?.let { realtime?.leave(it) }
-        remoteFace = null
         remoteHands = emptyList()
         remoteHandImage = null
         remoteMouth = 0f
@@ -284,40 +313,6 @@ object Calls {
         track?.write(samples, 0, samples.size, AudioTrack.WRITE_NON_BLOCKING)
     }
 
-    // ---------------------------------------------------------------- Personas
-
-    /** Our Persona, compressed, in small pieces (realtime messages must stay small). */
-    private fun sendPersona() {
-        val ctx = context ?: return
-        val topic = room ?: return
-        val face = Persona.load(ctx) ?: return
-        val bytes = ByteArrayOutputStream().also {
-            @Suppress("DEPRECATION")
-            face.image.compress(Bitmap.CompressFormat.WEBP, 80, it)
-        }.toByteArray()
-        val text = Base64.encodeToString(bytes, Base64.NO_WRAP)
-        val pieces = text.chunked(CHUNK)
-        val points = JSONArray().apply { face.points.forEach { put(Math.round(it * 10) / 10.0) } }.toString()
-        pieces.forEachIndexed { i, piece ->
-            val message = JSONObject().put("i", i).put("n", pieces.size).put("d", piece)
-            if (i == 0) message.put("p", points)
-            realtime?.broadcast(topic, "persona", message)
-        }
-    }
-
-    private fun receivePersona(payload: JSONObject) {
-        val i = payload.optInt("i"); val n = payload.optInt("n")
-        chunks[i] = payload.optString("d")
-        if (i == 0) chunkPoints = payload.optString("p")
-        if (chunks.size < n || chunkPoints == null) return
-        val bytes = Base64.decode((0 until n).joinToString("") { chunks[it] ?: "" }, Base64.NO_WRAP)
-        val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
-        val array = JSONArray(chunkPoints)
-        remoteFace = Persona.Face(image, FloatArray(array.length()) { array.getDouble(it).toFloat() })
-        chunks.clear()
-        changed()
-    }
-
     // ---------------------------------------------------------------- Hands
 
     private fun encodeHands(hands: List<FloatArray>): String {
@@ -343,8 +338,4 @@ object Calls {
     }
 
     private const val LOBBY = "phonexr-lobby"
-    private const val CHUNK = 24_000
-
-    @Suppress("unused")
-    private fun cacheFile(context: Context) = File(context.cacheDir, "remote_persona.webp")
 }

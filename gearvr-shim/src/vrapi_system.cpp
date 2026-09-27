@@ -6,6 +6,9 @@
 
 #include <cmath>
 #include <cstring>
+#include <unistd.h>
+#include <thread>
+#include <memory>
 
 namespace phonexr {
 
@@ -16,9 +19,23 @@ global()
 	return instance;
 }
 
+bool
+backend_ready(bool wait)
+{
+	Global &state = global();
+	if (!state.backend_ready.valid()) {
+		return false;
+	}
+	if (!wait && state.backend_ready.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+		return false;
+	}
+	return state.backend_ready.get();
+}
+
 namespace {
 
-// Which headset the game should believe it runs on: debug.phonexr.vrapi.product = gearvr | go | quest.
+// Which headset the game should believe it runs on: debug.phonexr.vrapi.product = gearvr | go | quest,
+// or by the game's build when it is not set.
 Product
 configured_product()
 {
@@ -30,7 +47,12 @@ configured_product()
 	if (std::strcmp(value, "go") == 0) {
 		return Product::oculus_go;
 	}
-	return Product::gear_vr;
+	if (std::strcmp(value, "gearvr") == 0) {
+		return Product::gear_vr;
+	}
+	// Not set: a 64-bit game is a Quest game (there never was a 64-bit Gear VR), so it gets both
+	// hands as tracked Touch controllers; a 32-bit one is Gear VR with its one pointer.
+	return sizeof(void *) == 8 ? Product::quest : Product::gear_vr;
 }
 
 // Runs a JNI call on the current thread, attaching it to the VM for the call if needed.
@@ -122,12 +144,28 @@ vrapi_Initialize(const ovrInitParms *initParms)
 
 	state.vm = initParms->Java.Vm;
 	with_env([&](JNIEnv *env) { state.activity = env->NewGlobalRef(initParms->Java.ActivityObject); });
-	if (!state.backend.initialize(state.vm, state.activity)) {
-		VRAPI_WARN("PhoneXR runtime is not available");
-		with_env([&](JNIEnv *env) { env->DeleteGlobalRef(state.activity); });
-		state.activity = nullptr;
-		return VRAPI_INITIALIZE_SERVICE_CONNECTION_FAILED;
-	}
+	// PhoneXR Runtime starts in the background. The Oculus driver returned at once, and games are
+	// written for that: a NativeActivity game's main thread waits for this thread to take the resume
+	// and window events, while connecting to the runtime needs that main thread — waiting here would
+	// block both. vrapi_EnterVrMode, which comes once the window is there, waits for it instead.
+	// Its own thread, with no looper: for a NativeActivity, Monado's instance creation pumps the
+	// calling thread's looper and would hand the game's window events to the game while waiting.
+	// The thread stays for the life of the process: the OpenXR loader unloads and reloads the runtime
+	// while starting, and a thread that ran runtime code must not exit and run its destructors then.
+	JavaVM *vm = state.vm;
+	jobject activity = state.activity;
+	auto started = std::make_shared<std::promise<bool>>();
+	state.backend_ready = started->get_future().share();
+	std::thread([vm, activity, started] {
+		const bool up = global().backend.initialize(vm, activity);
+		if (!up) {
+			VRAPI_WARN("PhoneXR runtime is not available");
+		}
+		started->set_value(up);
+		for (;;) {
+			pause();
+		}
+	}).detach();
 	state.product = configured_product();
 	state.api_minor_version = initParms->MinorVersion;
 	state.initialized = true;
@@ -144,6 +182,7 @@ vrapi_Shutdown()
 		return;
 	}
 	release_swapchain_copies();
+	backend_ready(true);
 	state.backend.shutdown();
 	with_env([&](JNIEnv *env) { env->DeleteGlobalRef(state.activity); });
 	state.activity = nullptr;
@@ -182,8 +221,11 @@ vrapi_GetSystemPropertyInt(const ovrJava *, const ovrSystemProperty propType)
 	VRAPI_TRACE("vrapi_GetSystemPropertyInt");
 	Global &state = global();
 	const XrBackend &backend = state.backend;
-	const int eye_width = backend.recommended_width() != 0 ? static_cast<int>(backend.recommended_width()) : 1024;
-	const int eye_height = backend.recommended_height() != 0 ? static_cast<int>(backend.recommended_height()) : 1024;
+	// Until the runtime is up the size is not known yet: a Quest-like default (copied into the
+	// runtime's own swapchain at submit, so any size works).
+	const bool up = backend_ready(false);
+	const int eye_width = up && backend.recommended_width() != 0 ? static_cast<int>(backend.recommended_width()) : 1536;
+	const int eye_height = up && backend.recommended_height() != 0 ? static_cast<int>(backend.recommended_height()) : 1536;
 	switch (propType) {
 	case VRAPI_SYS_PROP_DEVICE_TYPE:
 		switch (state.product) {

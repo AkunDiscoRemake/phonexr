@@ -47,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -83,38 +84,61 @@ import androidx.compose.material3.ColorScheme as MaterialColors
 import androidx.compose.material3.darkColorScheme as materialDarkColors
 import androidx.compose.material3.lightColorScheme as materialLightColors
 
+/** How much larger the phone app is drawn than Android's standard size. */
+const val PHONE_SCALE = 1.12f
+
 /** PhoneXR orange, the accent of the launcher icon. */
 private val orange = Color(0xFFFF7A1A)
 private val orangeDark = Color(0xFFFF9544)
 
-/** The two looks PhoneXR can wear. The user picks one in Settings, and it applies at once. */
+/**
+ * The looks PhoneXR has worn. Now every screen, on the phone and in VR, wears [HORIZON]: the same
+ * white glass and ink as the VR home. The older two stay only so saved settings still read.
+ */
 enum class UiStyle(val title: String, val detail: String) {
     CUPERTINO("PhoneXR UI", "Сгруппированные списки и оранжевый акцент PhoneXR"),
-    MATERIAL("Material You", "Как в Android: карточки и цвета из обоев системы")
+    MATERIAL("Material You", "Как в Android: карточки и цвета из обоев системы"),
+    HORIZON("PhoneXR VR", "Как в VR: белое стекло, тёмные надписи, скруглённые карточки"),
 }
 
-/** The chosen look, where every screen can read it and recompose the moment it changes. */
+/** The look and light or dark, where every screen can read them and recompose when they change. */
 object Ui {
-    var style by mutableStateOf(UiStyle.CUPERTINO)
+    var style by mutableStateOf(UiStyle.HORIZON)
         private set
+    /** PhoneXR is dark only, like Meta's newest look: there is no light theme any more. */
+    val dark = true
 
-    fun load(context: Context) {
-        style = Settings.uiStyle(context)
-    }
+    /** Card-and-row screens (Material and Horizon) rather than compose-hig sections. */
+    val flat get() = style != UiStyle.CUPERTINO
 
-    fun set(context: Context, value: UiStyle) {
-        Settings.setUiStyle(context, value)
-        style = value
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun load(context: Context) = Unit
 }
 
-/** Apple HIG (compose-hig) or Material You, in light and dark. */
+/**
+ * The PhoneXR look in light or dark; [dark] null follows the shared light/dark choice ([Ui.dark]).
+ * [scale] makes everything larger: the phone app is drawn a size up, like the VR home's big
+ * controls; the VR windows keep 1.
+ */
 @Composable
-fun PhoneXRTheme(content: @Composable () -> Unit) {
+fun PhoneXRTheme(dark: Boolean? = null, scale: Float = PHONE_SCALE, content: @Composable () -> Unit) {
     val context = LocalContext.current
     remember { Ui.load(context) }
-    val dark = isSystemInDarkTheme()
-    if (Ui.style == UiStyle.MATERIAL) {
+    val night = dark ?: Ui.dark
+    if (Ui.style == UiStyle.HORIZON) {
+        val colors = horizonColors(night)
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.ui.platform.LocalDensity provides androidx.compose.ui.unit.Density(density.density * scale, density.fontScale)
+        ) {
+            MaterialTheme(colorScheme = colors) {
+                CupertinoTheme(colorScheme = cupertinoFrom(colors, night).copy(accent = colors.primary), content = content)
+            }
+        }
+        return
+    }
+    val dark = night
+    if (Ui.flat) {
         val colors = materialColors(context, dark)
         MaterialTheme(colorScheme = colors) {
             // Everything still drawn by compose-hig (texts, switches, dialogs) takes these colours too.
@@ -124,6 +148,31 @@ fun PhoneXRTheme(content: @Composable () -> Unit) {
         val colors = if (dark) darkColorScheme(accent = orangeDark) else lightColorScheme(accent = orange)
         CupertinoTheme(colorScheme = colors, content = content)
     }
+}
+
+/** The VR home's colours: white glass and #272727 ink, or the same inverted. */
+private fun horizonColors(dark: Boolean): MaterialColors {
+    val ink = Color(0xFF272727)
+    val paper = Color(0xFFF2F2F2)
+    return if (dark) materialDarkColors(
+        primary = paper, onPrimary = ink, primaryContainer = Color(0xFF3A3F48), onPrimaryContainer = paper,
+        secondary = paper, onSecondary = ink, secondaryContainer = Color(0xFF3A3F48), onSecondaryContainer = paper,
+        tertiary = Color(0xFF7BD88F),
+        background = Color(0xFF14171C), onBackground = paper,
+        surface = Color(0xFF14171C), onSurface = paper, onSurfaceVariant = Color(0xB3F2F2F2),
+        surfaceContainerLowest = Color(0xFF1A1D23), surfaceContainerLow = Color(0xFF20242B), surfaceContainer = Color(0xFF252A31),
+        surfaceContainerHigh = Color(0xFF2F343C), surfaceContainerHighest = Color(0xFF3A3F48),
+        outline = Color(0x66F2F2F2), outlineVariant = Color(0x1FF2F2F2), error = Color(0xFFFF6B6B),
+    ) else materialLightColors(
+        primary = ink, onPrimary = Color.White, primaryContainer = Color(0xFFE6E6E6), onPrimaryContainer = ink,
+        secondary = ink, onSecondary = Color.White, secondaryContainer = Color(0xFFE6E6E6), onSecondaryContainer = ink,
+        tertiary = Color(0xFF0B8A1B),
+        background = paper, onBackground = ink,
+        surface = paper, onSurface = ink, onSurfaceVariant = Color(0xB3272727),
+        surfaceContainerLowest = Color.White, surfaceContainerLow = Color.White, surfaceContainer = Color.White,
+        surfaceContainerHigh = Color(0xFFEDEDED), surfaceContainerHighest = Color(0xFFE6E6E6),
+        outline = Color(0x66272727), outlineVariant = Color(0x1A272727), error = Color(0xFFD32F2F),
+    )
 }
 
 /** Material You: the wallpaper palette on Android 12 and newer, the PhoneXR orange before that. */
@@ -156,8 +205,8 @@ object HigColors {
     val accent: Color @Composable get() = CupertinoTheme.colorScheme.accent
     val label: Color @Composable get() = CupertinoTheme.colorScheme.label
     val secondary: Color @Composable get() = CupertinoTheme.colorScheme.secondaryLabel
-    val good: Color @Composable get() = if (Ui.style == UiStyle.MATERIAL) MaterialTheme.colorScheme.primary else Color(0xFF34C759)
-    val bad: Color @Composable get() = if (Ui.style == UiStyle.MATERIAL) MaterialTheme.colorScheme.error else Color(0xFFFF3B30)
+    val good: Color @Composable get() = if (Ui.style == UiStyle.HORIZON) Color(0xFF0B8A1B) else if (Ui.flat) MaterialTheme.colorScheme.primary else Color(0xFF34C759)
+    val bad: Color @Composable get() = if (Ui.flat) MaterialTheme.colorScheme.error else Color(0xFFFF3B30)
 }
 
 // ---------------------------------------------------------------- pages and sections
@@ -173,13 +222,17 @@ fun HigPage(
     bottomInset: Dp = 24.dp,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val material = Ui.style == UiStyle.MATERIAL
+    val material = Ui.flat
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(
-                if (material) MaterialTheme.colorScheme.surface
-                else CupertinoTheme.colorScheme.systemGroupedBackground
+                if (Ui.style == UiStyle.HORIZON) androidx.compose.ui.graphics.Brush.verticalGradient(
+                    listOf(MaterialTheme.colorScheme.surfaceContainerLowest, MaterialTheme.colorScheme.surface)
+                )
+                else androidx.compose.ui.graphics.SolidColor(
+                    if (material) MaterialTheme.colorScheme.surface else CupertinoTheme.colorScheme.systemGroupedBackground
+                )
             )
             .statusBarsPadding()
             .verticalScroll(rememberScrollState())
@@ -200,7 +253,12 @@ fun HigPage(
             Spacer(Modifier.height(16.dp))
         }
         if (material) {
-            Text(title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.padding(horizontal = 20.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.headlineLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
         } else {
             CupertinoText(title, style = CupertinoTheme.typography.largeTitle, modifier = Modifier.padding(horizontal = 20.dp))
         }
@@ -239,7 +297,7 @@ fun HigSection(
     footer: String? = null,
     content: @Composable HigScope.() -> Unit
 ) {
-    if (Ui.style != UiStyle.MATERIAL) {
+    if (!Ui.flat) {
         CupertinoSection(
             title = title?.let { { CupertinoText(it.sectionTitle()) } },
             caption = footer?.let { { CupertinoText(it) } },
@@ -252,13 +310,17 @@ fun HigSection(
             Text(
                 title,
                 style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
+                color = if (Ui.style == UiStyle.HORIZON) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(start = 12.dp, bottom = 6.dp)
             )
         }
+        val horizon = Ui.style == UiStyle.HORIZON
         Surface(
-            shape = RoundedCornerShape(20.dp),
+            // Horizon cards: rounder, white, with a hairline edge and a soft shadow.
+            shape = RoundedCornerShape(if (horizon) 28.dp else 20.dp),
             color = MaterialTheme.colorScheme.surfaceContainer,
+            border = if (horizon) androidx.compose.foundation.BorderStroke(Dp.Hairline, MaterialTheme.colorScheme.outlineVariant) else null,
+            shadowElevation = if (horizon) 2.dp else 0.dp,
             modifier = Modifier.fillMaxWidth()
         ) {
             Column { HigScope(null).content() }
@@ -344,7 +406,7 @@ fun HigScope.HigStepper(title: String, value: String, detail: String? = null, on
 
 @Composable
 private fun StepButton(label: String, onClick: () -> Unit) {
-    if (Ui.style == UiStyle.MATERIAL) {
+    if (Ui.flat) {
         FilledTonalButton(onClick = onClick, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp), modifier = Modifier.size(40.dp)) {
             Text(label)
         }
@@ -534,7 +596,7 @@ private fun MaterialTitle(
 @Composable
 fun HigButton(text: String, enabled: Boolean = true, filled: Boolean = true, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
-        if (Ui.style == UiStyle.MATERIAL) {
+        if (Ui.flat) {
             if (filled) {
                 Button(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text(text) }
             } else {
@@ -555,7 +617,7 @@ fun HigButton(text: String, enabled: Boolean = true, filled: Boolean = true, onC
 /** A line of text in whichever look is on. */
 @Composable
 fun HigText(text: String, color: Color = Color.Unspecified, modifier: Modifier = Modifier) {
-    if (Ui.style == UiStyle.MATERIAL) {
+    if (Ui.flat) {
         Text(text, color = if (color == Color.Unspecified) MaterialTheme.colorScheme.onSurface else color, modifier = modifier)
     } else {
         CupertinoText(text, color = color, modifier = modifier)
@@ -566,7 +628,7 @@ fun HigText(text: String, color: Color = Color.Unspecified, modifier: Modifier =
 @OptIn(ExperimentalCupertinoApi::class)
 @Composable
 fun HigSpinner() {
-    if (Ui.style == UiStyle.MATERIAL) {
+    if (Ui.flat) {
         CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
     } else {
         CupertinoActivityIndicator()
@@ -591,7 +653,7 @@ fun HigAlert(
     actions: List<HigAction>,
     onDismiss: () -> Unit
 ) {
-    if (Ui.style != UiStyle.MATERIAL) {
+    if (!Ui.flat) {
         CupertinoAlertDialog(
             onDismissRequest = onDismiss,
             title = { CupertinoText(title) },
@@ -654,7 +716,11 @@ fun HigTabBar(
     modifier: Modifier = Modifier,
     onSelect: (Int) -> Unit
 ) {
-    if (Ui.style == UiStyle.MATERIAL) {
+    if (Ui.style == UiStyle.HORIZON) {
+        HorizonTabBar(tabs, selected, modifier, onSelect)
+        return
+    }
+    if (Ui.flat) {
         NavigationBar(modifier = modifier) {
             tabs.forEachIndexed { index, tab ->
                 NavigationBarItem(
@@ -683,6 +749,44 @@ fun HigTabBar(
                     icon = { CupertinoIcon(tab.icon, null) },
                     label = { CupertinoText(tab.label) }
                 )
+            }
+        }
+    }
+}
+
+/**
+ * The tab bar as the VR dock: a floating white glass pill, the chosen tab a solid ink circle with
+ * its name beside it.
+ */
+@Composable
+private fun HorizonTabBar(tabs: List<HigTab>, selected: Int, modifier: Modifier, onSelect: (Int) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(50)
+    Box(modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .shadow(10.dp, shape)
+                .clip(shape)
+                .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(colors.surfaceContainerLowest, colors.surfaceContainerHigh)))
+                .padding(6.dp)
+        ) {
+            tabs.forEachIndexed { index, tab ->
+                val chosen = index == selected
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .clip(shape)
+                        .background(if (chosen) colors.primary else Color.Transparent)
+                        .clickable { onSelect(index) }
+                        .heightIn(min = 48.dp)
+                        .padding(horizontal = if (chosen) 16.dp else 12.dp)
+                ) {
+                    Icon(tab.icon, tab.label, tint = if (chosen) colors.onPrimary else colors.onSurface, modifier = Modifier.size(24.dp))
+                    if (chosen) Text(tab.label, color = colors.onPrimary, style = MaterialTheme.typography.labelLarge)
+                }
             }
         }
     }

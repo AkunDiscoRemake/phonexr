@@ -332,6 +332,10 @@ vrapi_EnterVrMode(const ovrModeParms *parms)
 		return nullptr;
 	}
 
+	// The runtime was started by vrapi_Initialize in the background; the window is here now.
+	if (!backend_ready(true)) {
+		return nullptr;
+	}
 	std::lock_guard<std::recursive_mutex> guard(state.lock);
 	// Only one activity can be in VR mode; a new one takes over.
 	if (state.backend.has_session()) {
@@ -472,6 +476,12 @@ vrapi_SubmitFrame2(ovrMobile *ovr, const ovrSubmitFrameDescription2 *frameDescri
 				warn_layer_once(header->Type);
 			}
 		}
+	}
+	static unsigned submitted = 0;
+	if (submitted++ % 300 == 0) {
+		VRAPI_LOG("frame %u: real %d running %d, %u layers from the game, %zu to the runtime", submitted,
+		          ovr->frame_real ? 1 : 0, state.backend.session_running() ? 1 : 0, frameDescription->LayerCount,
+		          layers.size());
 	}
 	close_frame(ovr, layers);
 	return ovrSuccess;

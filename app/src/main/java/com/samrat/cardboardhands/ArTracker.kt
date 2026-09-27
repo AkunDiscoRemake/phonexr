@@ -36,6 +36,12 @@ class ArTracker private constructor(private val session: Session) {
         private set
     @Volatile var verticalPlanes = 0
         private set
+    /** What the room scan found, in the VR home's world: floor, table, walls, drawn as a grid. */
+    @Volatile var surfaces: List<RoomScan.Surface> = emptyList()
+        private set
+    private var frames = 0
+    private var lastPlanes: List<Plane> = emptyList()
+
     /** Head position in the head tracker's world, metres, relative to where tracking started. */
     val position = FloatArray(3)
     private var origin: FloatArray? = null
@@ -97,6 +103,7 @@ class ArTracker private constructor(private val session: Session) {
             }
             horizontalPlanes = planes.count { it.type != Plane.Type.VERTICAL }
             verticalPlanes = planes.count { it.type == Plane.Type.VERTICAL }
+            lastPlanes = planes
         }
         synchronized(projection) { camera.getProjectionMatrix(projection, 0, .05f, 100f) }
         if (tracking) {
@@ -127,6 +134,19 @@ class ArTracker private constructor(private val session: Session) {
                 position[0] = px
                 position[1] = py
                 position[2] = pz
+            }
+        }
+        // The scanned surfaces, a few times a second (their outlines grow slowly).
+        if (tracking && origin != null && !alignYaw.isNaN() && frames++ % 10 == 0) {
+            val start = origin!!
+            val c = kotlin.math.cos(alignYaw); val s = kotlin.math.sin(alignYaw)
+            surfaces = lastPlanes.mapNotNull { plane ->
+                runCatching {
+                    RoomScan.surface(plane) { x, y, z ->
+                        val dx = x - start[0]; val dy = y - start[1]; val dz = z - start[2]
+                        floatArrayOf(c * dx + s * dz, dy, -s * dx + c * dz)
+                    }
+                }.getOrNull()
             }
         }
         if (!wantImage) return null

@@ -193,6 +193,13 @@ object JoyConButtons {
         return if (kotlin.math.abs(limited) < .12f) 0f else limited
     }
 
+    /** A stick read straight from the Joy-Con (root mode), already upright and −1..1. */
+    fun setStick(left: Boolean, x: Float, y: Float) {
+        val slot = sticks[if (left) 0 else 1]
+        slot[0] = x
+        slot[1] = y
+    }
+
     fun clear() {
         masks.set(0, 0)
         masks.set(1, 0)

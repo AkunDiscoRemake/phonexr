@@ -87,9 +87,15 @@ object AndroidManifestPatcher {
         return Result(tree.build(), changes)
     }
 
+    /**
+     * Features only a headset has. A game that requires one cannot even be installed on a phone,
+     * so the patch makes them optional — Quest, Pico, Vive, and Android XR (Samsung Galaxy XR and
+     * the other Android XR headsets: android.software.xr.api.openxr, …xr.immersive and so on).
+     */
     private fun isHeadsetFeature(name: String) = name.startsWith("oculus.") ||
         name.startsWith("com.oculus.") || name.startsWith("android.hardware.vr") ||
-        name.startsWith("wave.feature") || name.startsWith("picovr")
+        name.startsWith("wave.feature") || name.startsWith("picovr") ||
+        name.startsWith("android.software.xr.") || name.startsWith("android.hardware.xr.")
 
     /** A string value of an element to be written, e.g. android:name="…". */
     private class Attribute(val namespace: Int, val name: Int, val value: Int)
@@ -247,7 +253,8 @@ object AndroidManifestPatcher {
         private fun queriesBroker(): Boolean = nodes.any { node ->
             if (node !is Node.Original || type(node) != CHUNK_START_ELEMENT) return@any false
             when (name(node)) {
-                "provider" -> attributeValue(node, "authorities")?.contains("openxr.runtime_broker") == true
+                // Either broker: PhoneXR Runtime answers as the system broker itself.
+                "provider" -> attributeValue(node, "authorities")?.contains("runtime_broker") == true
                 "package" -> attributeValue(node, "name") == PhoneXrRuntime.PACKAGE
                 else -> false
             }
@@ -256,7 +263,7 @@ object AndroidManifestPatcher {
         /** See [AndroidManifestPatcher.markers]. */
         fun markers(): Set<String> = nodes.mapNotNullTo(mutableSetOf()) { node ->
             if (node !is Node.Original || type(node) != CHUNK_START_ELEMENT) null
-            else if (name(node) != "meta-data" && name(node) != "category") null
+            else if (name(node) != "meta-data" && name(node) != "category" && name(node) != "property" && name(node) != "uses-feature") null
             else attributeValue(node, "name")
         }
 

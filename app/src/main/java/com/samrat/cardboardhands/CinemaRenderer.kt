@@ -171,7 +171,7 @@ class CinemaRenderer(
         val eyeWidth = width / 2
         for (index in 0..1) {
             Matrix.perspectiveM(projection, 0, FOV_Y, eyeWidth.toFloat() / height, .05f, 200f)
-            eyes.shift(projection, index, eyeWidth)
+            eyes.shift(projection, index)
             GLES20.glViewport(index * eyeWidth, 0, eyeWidth, height)
             Matrix.setIdentityM(eye, 0)
             Matrix.translateM(eye, 0, if (index == 0) eyes.halfIpd else -eyes.halfIpd, 0f, 0f)
@@ -200,8 +200,7 @@ class CinemaRenderer(
             GLES20.glViewport(index * eyeWidth, 0, eyeWidth, height)
             GLES20.glDisable(GLES20.GL_DEPTH_TEST)
             // The lens offset moves the whole picture, so the two halves meet under the lenses.
-            val lens = if (eyes.offsetPixels == 0f) 0f else
-                (if (index == 0) 1f else -1f) * 2f * eyes.offsetPixels / eyeWidth
+            val lens = (if (index == 0) 1f else -1f) * 2f * eyes.lensShift
             // The app's screen is exactly the eye's size: it fills the view, nothing cut off.
             GLES20.glUseProgram(screenProgram)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)

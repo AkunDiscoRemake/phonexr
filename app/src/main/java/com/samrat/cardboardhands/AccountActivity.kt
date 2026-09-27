@@ -30,13 +30,17 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import zone.ien.hig.CupertinoActivityIndicator
 import zone.ien.hig.CupertinoText
 import zone.ien.hig.theme.CupertinoTheme
 import kotlin.concurrent.thread
 
-/** PhoneXR account (Supabase): sign in, create an account, sign out. Calls need it. */
+/**
+ * PhoneXR account (Supabase): sign in, create an account, sign out. PhoneXR asks for it on start
+ * ([EXTRA_REQUIRED]): until the user is signed in there is no way past this screen.
+ */
 class AccountActivity : ComponentActivity() {
+    private val required get() = intent.getBooleanExtra(EXTRA_REQUIRED, false)
+
     private var user by mutableStateOf<Account.User?>(null)
     private var creating by mutableStateOf(false)
     private var email by mutableStateOf("")
@@ -47,6 +51,13 @@ class AccountActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        L10n.init(this)
+        // Without an account, back leaves PhoneXR instead of slipping past the sign-in.
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (required && Account.current(this@AccountActivity) == null) finishAffinity() else finish()
+            }
+        })
         user = Account.current(this)
         name = Settings.userName(this)
         setContent { PhoneXRTheme { Screen() } }
@@ -64,13 +75,19 @@ class AccountActivity : ComponentActivity() {
                 busy = false
                 error = result
                 user = Account.current(this)
+                // Signed in on the start screen: straight on into PhoneXR.
+                if (required && user != null) finish()
             }
         }
     }
 
     @Composable
     private fun Screen() {
-        HigPage(title = tr("Аккаунт"), onBack = ::finish) {
+        HigPage(
+            title = if (required) "PhoneXR" else tr("Аккаунт"),
+            subtitle = if (required) "Для входа в PhoneXR нужен аккаунт: друзья, звонки, магазин и настройки идут с вами на любой телефон." else null,
+            onBack = if (required) null else ::finish
+        ) {
             val current = user
             if (current != null) {
                 HigSection(footer = "С аккаунтом вы видны друзьям в приложении «Звонки» в шлеме и можете звонить им персоной.") {
@@ -99,7 +116,7 @@ class AccountActivity : ComponentActivity() {
                         .clickable(enabled = !busy && email.isNotBlank() && password.length >= 6) { submit() },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (busy) CupertinoActivityIndicator()
+                    if (busy) HigSpinner()
                     else CupertinoText(if (creating) "Создать аккаунт" else tr("Войти"), color = Color.White, fontWeight = FontWeight.SemiBold)
                 }
                 CupertinoText(
@@ -130,5 +147,10 @@ class AccountActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth()
             )
         }
+    }
+
+    companion object {
+        /** Started by PhoneXR on launch: the user must sign in to go on. */
+        const val EXTRA_REQUIRED = "required"
     }
 }
