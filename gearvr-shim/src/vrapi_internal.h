@@ -2,7 +2,7 @@
 //
 // libvrapi.so from the Oculus Mobile SDK is only a loader: it looks for the Oculus system driver
 // that shipped on Samsung phones and refuses to start without it. This library replaces it and
-// serves the same exports from Compatibility-Layer, so a Gear VR game starts on any phone with PhoneXR.
+// serves the same exports from Compatibility-Layer, so a Gear VR game starts on any phone with CompatibilityLayer.
 // Structures come from the SDK headers (VrApi 1.1.50), their layout must match the game's.
 #pragma once
 
@@ -23,22 +23,22 @@
 #include <mutex>
 #include <vector>
 
-#define VRAPI_LOG(...) __android_log_print(ANDROID_LOG_INFO, "PhoneXR-VrApi", __VA_ARGS__)
-#define VRAPI_WARN(...) __android_log_print(ANDROID_LOG_WARN, "PhoneXR-VrApi", __VA_ARGS__)
+#define VRAPI_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Compatibility-Layer-VrApi", __VA_ARGS__)
+#define VRAPI_WARN(...) __android_log_print(ANDROID_LOG_WARN, "Compatibility-Layer-VrApi", __VA_ARGS__)
 // Logs the first calls of every VrApi function, so a crashing game shows where it stopped.
 #define VRAPI_TRACE(name)                                                                                              \
 	do {                                                                                                           \
 		static int calls = 0;                                                                                  \
 		if (calls < 3) {                                                                                       \
 			calls++;                                                                                       \
-			__android_log_print(ANDROID_LOG_DEBUG, "PhoneXR-VrApi", "call %s", name);                     \
+			__android_log_print(ANDROID_LOG_DEBUG, "Compatibility-Layer-VrApi", "call %s", name);                     \
 		}                                                                                                      \
 	} while (0)
 
 // Exports that the real libvrapi.so has but the public headers do not declare.
 #define VRAPI_EXTRA_EXPORT extern "C" __attribute__((visibility("default")))
 
-namespace phonexr {
+namespace compatibility-layer {
 
 // Gear VR device ids from older Oculus Mobile SDKs (the 1.50 header only lists Quest).
 constexpr int kDeviceGearVr = 5; // Galaxy S8, anywhere in 0..63 means Gear VR
@@ -65,7 +65,7 @@ struct Global
 	JavaVM *vm = nullptr;
 	jobject activity = nullptr; // global reference
 	bool initialized = false;
-	// PhoneXR Runtime is connected in the background (see vrapi_Initialize): true once it is up.
+	// Compatibility-Layer Runtime is connected in the background (see vrapi_Initialize): true once it is up.
 	std::shared_future<bool> backend_ready;
 	Product product = Product::gear_vr;
 	int32_t api_minor_version = 0;
@@ -73,7 +73,7 @@ struct Global
 
 Global &global();
 
-// Whether PhoneXR Runtime is up; with [wait], waits for the background start to finish.
+// Whether Compatibility-Layer Runtime is up; with [wait], waits for the background start to finish.
 bool backend_ready(bool wait);
 
 // ovrTextureSwapChain from VrApi.h. Images live in the game's GL context; at submit time the
@@ -84,7 +84,7 @@ struct ChainCopy
 	bool raw = false; // bytes are copied without sRGB conversion
 };
 
-} // namespace phonexr
+} // namespace compatibility-layer
 
 struct ovrTextureSwapChain
 {
@@ -98,7 +98,7 @@ struct ovrTextureSwapChain
 	std::vector<bool> owned;
 	ovrTextureSamplerState sampler{};
 	// One Compatibility-Layer swapchain per eye slot, created on first submit of the current session.
-	std::array<phonexr::ChainCopy, 2> copies{};
+	std::array<compatibility-layer::ChainCopy, 2> copies{};
 };
 
 struct ovrMobile
@@ -114,10 +114,10 @@ struct ovrMobile
 	bool frame_waited = false;
 	bool frame_real = false;
 	uint64_t frame_index = 0;
-	phonexr::FrameTiming timing;
+	compatibility-layer::FrameTiming timing;
 
 	// Eye offsets from the head and FOVs from the last tracking query.
-	std::array<phonexr::Eye, 2> eye_offsets{};
+	std::array<compatibility-layer::Eye, 2> eye_offsets{};
 	bool eyes_known = false;
 
 	std::array<bool, 2> back_down{};
@@ -125,7 +125,7 @@ struct ovrMobile
 	bool visible = false;
 };
 
-namespace phonexr {
+namespace compatibility-layer {
 
 // Swapchains (vrapi_swapchain.cpp).
 void release_swapchain_copies(); // before the session goes away
@@ -141,4 +141,4 @@ Pose from_ovr(const ovrPosef &pose);
 ovrRigidBodyPosef rigid_body(const Pose &pose, double time);
 float floor_offset(const ovrMobile *ovr);
 
-} // namespace phonexr
+} // namespace compatibility-layer

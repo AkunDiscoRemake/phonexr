@@ -1,16 +1,13 @@
-package org.freedesktop.monado.phonexr;
+package dev.compatibility_layer.vrapidriver;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.database.Cursor;
 import android.net.Uri;
 
-/**
- * An empty provider whose URIs are granted to games started by {@link GameLauncher}: holding the
- * grant is what makes PhoneXR Runtime visible to them. Not exported, so a grant is really needed.
- */
+/** An empty provider whose URIs, granted to a game, make this driver visible to it. */
 public final class VisibilityProvider extends ContentProvider {
-    public static final String AUTHORITY = "org.freedesktop.monado.phonexr.visibility";
+    public static final String AUTHORITY = "dev.compatibility_layer.vrapidriver.visibility";
 
     @Override public boolean onCreate() { return true; }
     @Override public Cursor query(Uri uri, String[] projection, String selection, String[] arguments, String order) { return null; }

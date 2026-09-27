@@ -9,7 +9,7 @@ import java.io.File;
  * The entry point the VrApi loader inside every Gear VR / Quest game looks for: it opens this
  * package, calls load64 (load32 in 32-bit games; the Ext versions carry one more argument) and gets
  * the address of a function that hands out the driver's VrApi functions by name. The driver here is
- * PhoneXR's own VrApi, which draws through PhoneXR Runtime (Compatibility-Layer).
+ * Compatibility-Layer's own VrApi, which draws through Compatibility-Layer Runtime (Compatibility-Layer).
  */
 public final class DriverLoader {
     private static boolean loaded;
@@ -37,7 +37,7 @@ public final class DriverLoader {
             String folder = libraryDir(driver);
             // The Compatibility-Layer loader first, so the driver finds it by name in this class loader's namespace.
             System.load(folder + "/libcompatibility_layer_loader.so");
-            System.load(folder + "/libphonexr_vrapi.so");
+            System.load(folder + "/libcompatibility_layer_vrapi.so");
             loaded = true;
         }
         return procAddress();
@@ -48,7 +48,7 @@ public final class DriverLoader {
         ApplicationInfo info = driver.getApplicationInfo();
         File primary = new File(info.nativeLibraryDir);
         File own = new File(primary.getParentFile(), android.os.Process.is64Bit() ? "arm64" : "arm");
-        return new File(own, "libphonexr_vrapi.so").exists() ? own.getPath() : primary.getPath();
+        return new File(own, "libcompatibility_layer_vrapi.so").exists() ? own.getPath() : primary.getPath();
     }
 
     private DriverLoader() {

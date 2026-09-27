@@ -1,10 +1,10 @@
-// PhoneXR as the VrApi system driver: unpatched VrApi games run on it.
+// Compatibility-Layer as the VrApi system driver: unpatched VrApi games run on it.
 //
 // The libvrapi.so inside a Gear VR / Quest game is only a loader. vrapi_Initialize opens the package
 // com.oculus.systemdriver, calls com.oculus.systemdriver.DriverLoader.load64 (load32 in 32-bit games,
 // load64Ext/load32Ext with one more argument) and gets back the address of a function that returns the
 // driver's function for a name ("vrapi_Initialize", "vrapi_SubmitFrame2", …). Every vrapi_* call of the
-// game then goes to that function. PhoneXR's own VrApi (the same code as the drop-in libvrapi.so) is
+// game then goes to that function. Compatibility-Layer's own VrApi (the same code as the drop-in libvrapi.so) is
 // that driver here, so the game's APK stays as it is.
 
 #include <dlfcn.h>
@@ -43,7 +43,7 @@ get_proc(const char *name)
 		}
 	}
 	if (function == nullptr) {
-		__android_log_print(ANDROID_LOG_WARN, "PhoneXR-VrApi", "driver: no %s", name);
+		__android_log_print(ANDROID_LOG_WARN, "Compatibility-Layer-VrApi", "driver: no %s", name);
 	}
 	return function;
 }
@@ -53,6 +53,6 @@ get_proc(const char *name)
 extern "C" __attribute__((visibility("default"))) JNIEXPORT jlong JNICALL
 Java_com_oculus_systemdriver_DriverLoader_procAddress(JNIEnv *, jclass)
 {
-	__android_log_print(ANDROID_LOG_INFO, "PhoneXR-VrApi", "PhoneXR VrApi driver loaded");
+	__android_log_print(ANDROID_LOG_INFO, "Compatibility-Layer-VrApi", "Compatibility-Layer VrApi driver loaded");
 	return static_cast<jlong>(reinterpret_cast<intptr_t>(&get_proc));
 }

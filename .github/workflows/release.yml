@@ -1,4 +1,4 @@
-# Собирает PhoneXR SDK на стороне GitHub и кладёт JAR в релиз.
+# Собирает Compatibility-Layer SDK на стороне GitHub и кладёт JAR в релиз.
 name: Сборка и релиз
 
 on:
@@ -28,16 +28,16 @@ jobs:
         id: name
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          SDK="PhoneXR-SDK-${TAG#v}.zip"
-          mkdir -p release-sdk/PhoneXR-SDK
-          cp sdk/build/libs/sdk.jar release-sdk/PhoneXR-SDK/PhoneXR-SDK.jar
-          cp -R sdk/docs sdk/runtime sdk/tools release-sdk/PhoneXR-SDK/
-          cd release-sdk && zip -qr "../$SDK" PhoneXR-SDK && cd ..
+          SDK="Compatibility-Layer-SDK-${TAG#v}.zip"
+          mkdir -p release-sdk/Compatibility-Layer-SDK
+          cp sdk/build/libs/sdk.jar release-sdk/Compatibility-Layer-SDK/Compatibility-Layer-SDK.jar
+          cp -R sdk/docs sdk/runtime sdk/tools release-sdk/Compatibility-Layer-SDK/
+          cd release-sdk && zip -qr "../$SDK" Compatibility-Layer-SDK && cd ..
           echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
       - name: В релиз
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "${{ github.event.inputs.tag || github.ref_name }}" >/dev/null 2>&1 \
-            || gh release create "${{ github.event.inputs.tag || github.ref_name }}" --title "PhoneXR ${{ github.event.inputs.tag || github.ref_name }}" --generate-notes
+            || gh release create "${{ github.event.inputs.tag || github.ref_name }}" --title "Compatibility-Layer ${{ github.event.inputs.tag || github.ref_name }}" --generate-notes
           gh release upload "${{ github.event.inputs.tag || github.ref_name }}" "${{ steps.name.outputs.sdk }}" --clobber

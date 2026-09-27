@@ -11,7 +11,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace phonexr {
+namespace compatibility-layer {
 
 namespace {
 
@@ -394,9 +394,9 @@ copy_eye_image(ovrTextureSwapChain *chain, int index, int eye, const ovrRectf &r
 	return true;
 }
 
-} // namespace phonexr
+} // namespace compatibility-layer
 
-using namespace phonexr;
+using namespace compatibility-layer;
 
 extern "C" {
 

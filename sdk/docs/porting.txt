@@ -1,15 +1,15 @@
-Перенос игры на PhoneXR
+Перенос игры на Compatibility-Layer
 =======================
 
 1. Проверьте сборку:
 
-     python3 sdk/tools/phonexr_port.py игра.apk --check
+     python3 sdk/tools/compatibility_layer_port.py игра.apk --check
 
    Инструмент скажет, что нужно изменить, и остановится, если игра не подходит.
 
 2. Подготовьте APK:
 
-     python3 sdk/tools/phonexr_port.py игра.apk -o игра-phonexr.apk
+     python3 sdk/tools/compatibility_layer_port.py игра.apk -o игра-compatibility_layer.apk
 
    Что он делает:
      * targetSdk опускается до 29. Начиная с 30 Android скрывает от приложения чужие
@@ -18,10 +18,10 @@
      * Снимается обязательность фич гарнитур (oculus.*, android.hardware.vr.*, picovr,
        wave.feature) — иначе установщик отвечает «приложение несовместимо».
      * Снимается флаг обязательных дополнительных APK у сборок из Google Play.
-     * libcompatibility_layer_loader.so заменяется на сборку PhoneXR (--loader задаёт свой файл).
+     * libcompatibility_layer_loader.so заменяется на сборку Compatibility-Layer (--loader задаёт свой файл).
      * APK выравнивается под страницы 16 КБ и подписывается (--keystore задаёт свой ключ).
 
-3. Установите результат и запускайте игру из PhoneXR: он включает трекинг рук и
+3. Установите результат и запускайте игру из Compatibility-Layer: он включает трекинг рук и
    выбирает Compatibility-Layer-приложение.
 
 Чего инструмент не делает
@@ -31,7 +31,7 @@
 * Не обходит проверки покупки и не подменяет закрытый рантайм Meta. Сборки с
   libvrapi.so или libOVRPlatformLoader.so отклоняются.
 * Не переделывает управление. Игра должна работать с профилем контроллеров Oculus Touch:
-  PhoneXR выдаёт себя за него. Кнопки приходят с жестов рук или с Joy-Con.
+  Compatibility-Layer выдаёт себя за него. Кнопки приходят с жестов рук или с Joy-Con.
 * Не трогает 32-битные сборки: нужен arm64-v8a.
 
 Если после переноса чёрный экран

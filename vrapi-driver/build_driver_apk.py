@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Собирает PhoneXR VrApi Driver — пакет com.oculus.systemdriver, который загрузчик libvrapi.so внутри
-игр Gear VR / Quest открывает сам. В нём DriverLoader и собственный VrApi PhoneXR
-(gearvr-shim, цель phonexr_vrapi) с загрузчиком Compatibility-Layer: игры VrApi идут без патча.
+Собирает Compatibility-Layer VrApi Driver — пакет com.oculus.systemdriver, который загрузчик libvrapi.so внутри
+игр Gear VR / Quest открывает сам. В нём DriverLoader и собственный VrApi Compatibility-Layer
+(gearvr-shim, цель compatibility_layer_vrapi) с загрузчиком Compatibility-Layer: игры VrApi идут без патча.
 
   python3 vrapi-driver/build_driver_apk.py
-Сначала соберите gearvr-shim (build и build32, цель phonexr_vrapi).
+Сначала соберите gearvr-shim (build и build32, цель compatibility_layer_vrapi).
 """
 
 import glob
@@ -18,7 +18,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.join(ROOT, "vrapi-driver")
 SDK = os.environ.get("ANDROID_HOME") or os.path.expanduser("~/Library/Android/sdk")
-OUTPUT = os.path.join(ROOT, "vrapi-driver", "phonexr-vrapi-driver.apk")
+OUTPUT = os.path.join(ROOT, "vrapi-driver", "compatibility-layer-vrapi-driver.apk")
 
 
 def build_tool(name):
@@ -35,9 +35,9 @@ def main():
     shim = os.path.join(ROOT, "gearvr-shim", "build", "assets")
     assets = os.path.join(ROOT, "compatibility-layer-runtime", "loaders")
     libraries = {
-        "lib/arm64-v8a/libphonexr_vrapi.so": os.path.join(shim, "libphonexr_vrapi.so"),
+        "lib/arm64-v8a/libcompatibility_layer_vrapi.so": os.path.join(shim, "libcompatibility_layer_vrapi.so"),
         "lib/arm64-v8a/libcompatibility_layer_loader.so": os.path.join(assets, "libcompatibility_layer_loader.so"),
-        "lib/armeabi-v7a/libphonexr_vrapi.so": os.path.join(shim, "libphonexr_vrapi32.so"),
+        "lib/armeabi-v7a/libcompatibility_layer_vrapi.so": os.path.join(shim, "libcompatibility_layer_vrapi32.so"),
         "lib/armeabi-v7a/libcompatibility_layer_loader.so": os.path.join(assets, "libcompatibility_layer_loader32.so"),
     }
     for path in libraries.values():
@@ -62,7 +62,7 @@ def main():
                 apk.write(path, name, compress_type=zipfile.ZIP_DEFLATED)
         aligned = os.path.join(work, "aligned.apk")
         subprocess.run([build_tool("zipalign"), "-P", "16", "-f", "4", unsigned, aligned], check=True)
-        keystore = os.path.join(assets, "phonexr-signing.p12")
+        keystore = os.path.join(assets, "compatibility-layer-signing.p12")
         subprocess.run([build_tool("apksigner"), "sign", "--ks", keystore, "--ks-pass", "pass:android",
                         "--ks-key-alias", "androiddebugkey", "--key-pass", "pass:android",
                         "--out", OUTPUT, aligned], check=True)

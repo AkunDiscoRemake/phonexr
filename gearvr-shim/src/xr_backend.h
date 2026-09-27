@@ -1,7 +1,7 @@
 // Compatibility-Layer side of the Gear VR adapter.
 //
 // Gear VR games talk to VrApi (libvrapi.so). The adapter replaces that library and turns each
-// VrApi call into Compatibility-Layer on the PhoneXR runtime (Monado). This file owns everything Compatibility-Layer:
+// VrApi call into Compatibility-Layer on the Compatibility-Layer runtime (Monado). This file owns everything Compatibility-Layer:
 // instance, session, frame loop, eye swapchains, head tracking and controller input.
 // The VrApi-facing layer on top of it only converts structures.
 #pragma once
@@ -22,7 +22,7 @@
 #include <compatibility_layer/compatibility_layer.h>
 #include <compatibility_layer/compatibility_layer_platform.h>
 
-namespace phonexr {
+namespace compatibility-layer {
 
 struct Pose
 {
@@ -167,4 +167,4 @@ private:
 	std::array<Controller, 2> controllers_{};
 };
 
-} // namespace phonexr
+} // namespace compatibility-layer

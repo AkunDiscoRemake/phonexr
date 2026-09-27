@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Готовит Android-сборку Compatibility-Layer-игры к запуску на PhoneXR.
+Готовит Android-сборку Compatibility-Layer-игры к запуску на CompatibilityLayer.
 
 Что делает:
   * правит бинарный AndroidManifest.xml так, чтобы игра видела Compatibility-Layer-брокер и ставилась на телефон;
-  * подменяет libcompatibility_layer_loader.so на сборку PhoneXR (по желанию);
+  * подменяет libcompatibility_layer_loader.so на сборку Compatibility-Layer (по желанию);
   * для игр Gear VR подменяет libvrapi.so переходником VrApi -> Compatibility-Layer (gearvr-shim);
   * выравнивает и подписывает APK;
   * сообщает, если игра опирается на закрытый рантайм Meta и работать не будет.
@@ -22,11 +22,11 @@ import tempfile
 import zipfile
 
 MAX_TARGET_SDK = 29
-# Папки библиотек, которые PhoneXR обслуживает: 64 бита и 32 бита (старые игры кладут их в armeabi).
+# Папки библиотек, которые Compatibility-Layer обслуживает: 64 бита и 32 бита (старые игры кладут их в armeabi).
 ABIS = {"arm64-v8a": "", "armeabi-v7a": "32", "armeabi": "32"}
 # Gear VR и ранние Quest-игры рисуют через VrApi. Его заменяет переходник из gearvr-shim.
 VRAPI = ("libvrapi.so",)
-# Проверка покупки через сервисы Oculus. PhoneXR её не трогает, только предупреждает.
+# Проверка покупки через сервисы Oculus. Compatibility-Layer её не трогает, только предупреждает.
 ENTITLEMENT = ("libovrplatformloader.so", "libOVRPlatformLoader.so", "libovrplatform.so", "libOVRPlatform.so")
 HEADSET_FEATURE_PREFIXES = ("oculus.", "com.oculus.", "android.hardware.vr", "wave.feature", "picovr")
 
@@ -176,10 +176,10 @@ def repack(source, destination, loaders, vrapis):
                 changes += manifest_changes
             elif suffix is not None and name == f"lib/{abi}/libcompatibility_layer_loader.so" and loaders.get(suffix):
                 data = loaders[suffix]
-                changes.append(f"Compatibility-Layer loader ({bits}) заменён на сборку PhoneXR")
+                changes.append(f"Compatibility-Layer loader ({bits}) заменён на сборку Compatibility-Layer")
             elif suffix is not None and name == f"lib/{abi}/libvrapi.so" and vrapis.get(suffix):
                 data = vrapis[suffix]
-                changes.append(f"libvrapi.so ({bits}) заменён переходником PhoneXR (VrApi -> Compatibility-Layer)")
+                changes.append(f"libvrapi.so ({bits}) заменён переходником Compatibility-Layer (VrApi -> Compatibility-Layer)")
             method = zipfile.ZIP_STORED if name.endswith(".so") else entry.compress_type
             output.writestr(zipfile.ZipInfo(name, date_time=entry.date_time), data, compress_type=method)
         # Игре Gear VR переходнику нужен Compatibility-Layer loader рядом с libvrapi.so.
@@ -187,7 +187,7 @@ def repack(source, destination, loaders, vrapis):
             loader_path = f"lib/{abi}/libcompatibility_layer_loader.so"
             if f"lib/{abi}/libvrapi.so" in names and loader_path not in names and loaders.get(suffix) and vrapis.get(suffix):
                 output.writestr(zipfile.ZipInfo(loader_path), loaders[suffix], compress_type=zipfile.ZIP_STORED)
-                changes.append(f"добавлен Compatibility-Layer loader PhoneXR ({abi})")
+                changes.append(f"добавлен Compatibility-Layer loader Compatibility-Layer ({abi})")
     return changes, meta_libs, abis
 
 
@@ -202,7 +202,7 @@ def build_tool(name):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Готовит Compatibility-Layer-игру к запуску на PhoneXR")
+    parser = argparse.ArgumentParser(description="Готовит Compatibility-Layer-игру к запуску на Compatibility-Layer")
     parser.add_argument("apk", help="исходный APK")
     parser.add_argument("-o", "--output", help="куда сохранить готовый APK")
     parser.add_argument("--keystore", help="PKCS12 с ключом подписи", default=None)
@@ -215,7 +215,7 @@ def main():
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     assets = os.path.join(root, "compatibility-layer-runtime", "loaders")
-    keystore = arguments.keystore or os.path.join(root, "compatibility-layer-runtime", "signing", "phonexr-signing.p12")
+    keystore = arguments.keystore or os.path.join(root, "compatibility-layer-runtime", "signing", "compatibility-layer-signing.p12")
 
     def read(path):
         return open(path, "rb").read() if path and os.path.exists(path) else None
@@ -224,7 +224,7 @@ def main():
     vrapi_path = arguments.vrapi or os.path.join(root, "gearvr-shim/build/assets/libvrapi.so")
     loaders = {"": read(loader_path), "32": read(os.path.join(assets, "libcompatibility_layer_loader32.so"))}
     vrapis = {"": read(vrapi_path), "32": read(os.path.join(root, "gearvr-shim/build/assets/libvrapi32.so"))}
-    output = arguments.output or arguments.apk.rsplit(".", 1)[0] + "-phonexr.apk"
+    output = arguments.output or arguments.apk.rsplit(".", 1)[0] + "-compatibility_layer.apk"
 
     with tempfile.TemporaryDirectory() as workspace:
         staged = os.path.join(workspace, "staged.apk")
@@ -238,11 +238,11 @@ def main():
             print("\nОшибка: в APK нет библиотек для ARM (arm64-v8a или armeabi-v7a), такая сборка не запустится.")
             return 1
         if "arm64-v8a" not in abis:
-            print("\n32-битная игра: PhoneXR запустит её в 32-битном режиме.")
+            print("\n32-битная игра: Compatibility-Layer запустит её в 32-битном режиме.")
         entitlement = sorted(meta_libs.intersection(ENTITLEMENT))
         if entitlement:
             print("\nВнимание: в игре есть проверка покупки Oculus (" + ", ".join(entitlement) + ").")
-            print("PhoneXR её не трогает. Если игра действительно её требует, она не запустится.")
+            print("Compatibility-Layer её не трогает. Если игра действительно её требует, она не запустится.")
         if meta_libs.intersection(VRAPI):
             suffix = "" if "arm64-v8a" in abis else "32"
             if not vrapis[suffix] or not loaders[suffix]:
@@ -263,7 +263,7 @@ def main():
             "--out", output, aligned,
         ], check=True)
     print(f"\nГотово: {output}")
-    print("Установите его и запускайте из PhoneXR.")
+    print("Установите его и запускайте из CompatibilityLayer.")
     return 0
 
 

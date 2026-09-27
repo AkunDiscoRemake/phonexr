@@ -1,4 +1,4 @@
-package org.freedesktop.monado.phonexr;
+package org.freedesktop.monado.compatibility_layer;
 
 import android.content.ContentProvider;
 import android.content.ContentValues;
@@ -11,7 +11,7 @@ import java.io.File;
 import java.util.List;
 
 /**
- * The Compatibility-Layer system runtime broker, built into PhoneXR Runtime itself.
+ * The Compatibility-Layer system runtime broker, built into Compatibility-Layer Runtime itself.
  *
  * The Khronos Compatibility-Layer loader (Android XR games, Pico games, current Quest games) asks the provider
  * "org.khronos.compatibility_layer.system_runtime_broker" which runtime to load, and its own manifest already

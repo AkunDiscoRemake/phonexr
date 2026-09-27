@@ -59,7 +59,7 @@ index a705d90..b25dd49 100644
  }
 +
 +/*
-+ * PhoneXR hand-controller bridge.
++ * Compatibility-Layer hand-controller bridge.
 + * Cardboard Hands sends the latest MediaPipe gesture state over localhost UDP.
 + * Keeping the transport local avoids Android background IPC and network access.
 + */
@@ -322,7 +322,7 @@ index a705d90..b25dd49 100644
 +		xdev->inputs[i].active = active;
 +		xdev->inputs[i].timestamp = now;
 +	}
-+	// Joy-Con bits, see JoyConButtons.kt in PhoneXR.
++	// Joy-Con bits, see JoyConButtons.kt in CompatibilityLayer.
 +	uint32_t pad = active ? state->buttons : 0;
 +	uint32_t other_pad = phone_hands[controller->left ? 1 : 0].buttons;
 +	bool primary = active && (state->thumb || (pad & 0x1) != 0);
@@ -424,8 +424,8 @@ index a705d90..b25dd49 100644
 +		controller->base.inputs[i].name = names[i];
 +		controller->base.inputs[i].active = false;
 +	}
-+	snprintf(controller->base.str, XRT_DEVICE_NAME_LEN, "PhoneXR %s Hand", left ? "Left" : "Right");
-+	snprintf(controller->base.serial, XRT_DEVICE_NAME_LEN, "PhoneXR-%s", left ? "Left" : "Right");
++	snprintf(controller->base.str, XRT_DEVICE_NAME_LEN, "Compatibility-Layer %s Hand", left ? "Left" : "Right");
++	snprintf(controller->base.serial, XRT_DEVICE_NAME_LEN, "Compatibility-Layer-%s", left ? "Left" : "Right");
 +	return &controller->base;
 +}
 diff --git a/src/xrt/drivers/android/android_sensors.h b/src/xrt/drivers/android/android_sensors.h
@@ -451,7 +451,7 @@ index 97df566..9294d13 100644
          }
          outOfProcess {
 -            outOfProcessBaseConfig(it, "Monado XR")
-+            outOfProcessBaseConfig(it, "PhoneXR Runtime")
++            outOfProcessBaseConfig(it, "Compatibility-Layer Runtime")
          }
      }
      hilt {

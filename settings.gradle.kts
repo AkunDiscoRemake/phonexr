@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PhoneXR-Compatibility-Layer"
+rootProject.name = "Compatibility-Layer"
 include(":sdk")

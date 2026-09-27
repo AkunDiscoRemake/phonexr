@@ -7,19 +7,19 @@
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <application
-        android:label="PhoneXR VrApi Driver"
+        android:label="Compatibility-Layer VrApi Driver"
         android:hasCode="true"
         android:multiArch="true"
         android:extractNativeLibs="true">
         <activity
-            android:name="dev.phonexr.vrapidriver.GameLauncher"
+            android:name="dev.compatibility_layer.vrapidriver.GameLauncher"
             android:exported="true"
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <provider
-            android:name="dev.phonexr.vrapidriver.VisibilityProvider"
-            android:authorities="dev.phonexr.vrapidriver.visibility"
+            android:name="dev.compatibility_layer.vrapidriver.VisibilityProvider"
+            android:authorities="dev.compatibility_layer.vrapidriver.visibility"
             android:exported="false"
             android:grantUriPermissions="true" />
     </application>

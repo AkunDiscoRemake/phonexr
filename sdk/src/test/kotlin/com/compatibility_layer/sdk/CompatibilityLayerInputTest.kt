@@ -1,4 +1,4 @@
-package com.phonexr.sdk
+package com.compatibility_layer.sdk
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,14 +8,14 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 
-class PhoneXRInputTest {
-    // Пакет в том же виде, в каком его шлёт PhoneXR: левая рука с кулаком, правая с нажатым курком.
+class CompatibilityLayerInputTest {
+    // Пакет в том же виде, в каком его шлёт Compatibility-Layer: левая рука с кулаком, правая с нажатым курком.
     private val packet = "PH4 1 1 0 0 0.3400 0.5000 0.2000 0.00000 0.00000 0.00000 1.00000 0 " +
         "1 0 0 0 0.6600 0.4500 0.7000 0.00000 0.70711 0.00000 0.70711 4 1"
 
     @Test
     fun readsHandsGesturesAndButtons() {
-        PhoneXRInput(port = 42460).use { input ->
+        CompatibilityLayerInput(port = 42460).use { input ->
             send(42460, packet)
             val state = requireNotNull(input.read())
 
@@ -25,7 +25,7 @@ class PhoneXRInputTest {
             assertEquals(0, state.left.buttons)
 
             assertFalse(state.right.fist)
-            assertTrue(state.right.isPressed(PhoneXRInput.Button.TRIGGER))
+            assertTrue(state.right.isPressed(CompatibilityLayerInput.Button.TRIGGER))
             assertEquals(.70711f, state.right.qw, .0001f)
 
             assertTrue(state.sixDof)
@@ -39,7 +39,7 @@ class PhoneXRInputTest {
         val ph5 = "PH5 1 0 1 0 0.3000 0.4000 0.5000 0.00000 0.00000 0.00000 1.00000 0 0.000 0.000 " +
             "1 0 0 0 0.7000 0.4000 0.6000 0.00000 0.00000 0.00000 1.00000 4 0.000 1.000 1 " +
             "1 0 0 1"
-        PhoneXRInput(port = 42462).use { input ->
+        CompatibilityLayerInput(port = 42462).use { input ->
             send(42462, ph5)
             val state = requireNotNull(input.read())
             assertTrue(state.left.pinch)
@@ -47,7 +47,7 @@ class PhoneXRInputTest {
             assertTrue(state.left.index)
             assertTrue(state.right.palmToFace)
             assertEquals(1f, state.right.stickY, .0001f)
-            assertTrue(state.right.isPressed(PhoneXRInput.Button.TRIGGER))
+            assertTrue(state.right.isPressed(CompatibilityLayerInput.Button.TRIGGER))
             assertTrue(state.sixDof)
         }
     }
@@ -56,7 +56,7 @@ class PhoneXRInputTest {
     fun readsContinuousFingerCurlsFromPh6() {
         val ph6 = "PH6 1 0 0 0 .3 .4 .5 0 0 0 1 0 0 0 .10 .20 .30 .40 .50 " +
             "1 0 0 0 .7 .4 .6 0 0 0 1 0 0 0 .90 .80 .70 .60 .50 1 1 0 0 1"
-        PhoneXRInput(port = 42463).use { input ->
+        CompatibilityLayerInput(port = 42463).use { input ->
             send(42463, ph6)
             val state = requireNotNull(input.read())
             assertEquals(.1f, state.left.thumbCurl, .0001f)
@@ -69,7 +69,7 @@ class PhoneXRInputTest {
 
     @Test
     fun ignoresPacketsFromAnotherProtocolVersion() {
-        PhoneXRInput(port = 42461).use { input ->
+        CompatibilityLayerInput(port = 42461).use { input ->
             send(42461, "PH2 1 0 0 0 0.5 0.5 0.5")
             assertEquals(null, input.read())
         }

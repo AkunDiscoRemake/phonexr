@@ -1,7 +1,7 @@
-Поток данных PhoneXR
+Поток данных Compatibility-Layer
 ====================
 
-Пока в PhoneXR включён трекинг, он 60 раз в секунду шлёт UDP-пакет ASCII-текстом:
+Пока в Compatibility-Layer включён трекинг, он 60 раз в секунду шлёт UDP-пакет ASCII-текстом:
 
   127.0.0.1:42424   рантайму Monado
   127.0.0.1:42425   игре через SDK
@@ -40,5 +40,5 @@ SDK читает PH6, PH5 и PH4.
 
 Чтение:
 
-  Kotlin/JVM — com.phonexr.sdk.PhoneXRInput
-  C/C++      — runtime/phonexr_input.h
+  Kotlin/JVM — com.compatibility_layer.sdk.CompatibilityLayerInput
+  C/C++      — runtime/compatibility_layer_input.h

@@ -10,7 +10,7 @@
 #include <thread>
 #include <memory>
 
-namespace phonexr {
+namespace compatibility-layer {
 
 Global &
 global()
@@ -34,13 +34,13 @@ backend_ready(bool wait)
 
 namespace {
 
-// Which headset the game should believe it runs on: debug.phonexr.vrapi.product = gearvr | go | quest,
+// Which headset the game should believe it runs on: debug.compatibility_layer.vrapi.product = gearvr | go | quest,
 // or by the game's build when it is not set.
 Product
 configured_product()
 {
 	char value[PROP_VALUE_MAX] = {};
-	__system_property_get("debug.phonexr.vrapi.product", value);
+	__system_property_get("debug.compatibility_layer.vrapi.product", value);
 	if (std::strcmp(value, "quest") == 0) {
 		return Product::quest;
 	}
@@ -101,9 +101,9 @@ finish_activity()
 
 } // namespace
 
-} // namespace phonexr
+} // namespace compatibility-layer
 
-using namespace phonexr;
+using namespace compatibility-layer;
 
 extern "C" {
 
@@ -111,7 +111,7 @@ const char *
 vrapi_GetVersionString()
 {
 	VRAPI_TRACE("vrapi_GetVersionString");
-	return "1.1.50.0-PhoneXR";
+	return "1.1.50.0-Compatibility-Layer";
 }
 
 double
@@ -144,7 +144,7 @@ vrapi_Initialize(const ovrInitParms *initParms)
 
 	state.vm = initParms->Java.Vm;
 	with_env([&](JNIEnv *env) { state.activity = env->NewGlobalRef(initParms->Java.ActivityObject); });
-	// PhoneXR Runtime starts in the background. The Oculus driver returned at once, and games are
+	// Compatibility-Layer Runtime starts in the background. The Oculus driver returned at once, and games are
 	// written for that: a NativeActivity game's main thread waits for this thread to take the resume
 	// and window events, while connecting to the runtime needs that main thread — waiting here would
 	// block both. vrapi_EnterVrMode, which comes once the window is there, waits for it instead.
@@ -159,7 +159,7 @@ vrapi_Initialize(const ovrInitParms *initParms)
 	std::thread([vm, activity, started] {
 		const bool up = global().backend.initialize(vm, activity);
 		if (!up) {
-			VRAPI_WARN("PhoneXR runtime is not available");
+			VRAPI_WARN("Compatibility-Layer runtime is not available");
 		}
 		started->set_value(up);
 		for (;;) {

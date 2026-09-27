@@ -1,43 +1,43 @@
 /*
- * PhoneXR input feed for native games (C/C++).
+ * Compatibility-Layer input feed for native games (C/C++).
  *
- * Обычный ввод игра получает через CompatibilityLayer. Этот заголовок нужен для сырых данных PhoneXR:
+ * Обычный ввод игра получает через CompatibilityLayer. Этот заголовок нужен для сырых данных Compatibility-Layer:
  * положение ладоней в кадре, жесты и кнопки Joy-Con.
  *
  * Использование:
- *     #define PHONEXR_INPUT_IMPLEMENTATION
- *     #include "phonexr_input.h"
+ *     #define COMPATIBILITY_LAYER_INPUT_IMPLEMENTATION
+ *     #include "compatibility_layer_input.h"
  *
- *     struct phonexr_input in;
- *     phonexr_input_open(&in, PHONEXR_INPUT_PORT);
- *     struct phonexr_state state;
- *     if (phonexr_input_poll(&in, &state)) { ... }
- *     phonexr_input_close(&in);
+ *     struct compatibility_layer_input in;
+ *     compatibility_layer_input_open(&in, COMPATIBILITY_LAYER_INPUT_PORT);
+ *     struct compatibility_layer_state state;
+ *     if (compatibility_layer_input_poll(&in, &state)) { ... }
+ *     compatibility_layer_input_close(&in);
  *
  * Порт занимает один клиент: если данных нет, их уже читает другое приложение.
  */
-#ifndef PHONEXR_INPUT_H
-#define PHONEXR_INPUT_H
+#ifndef COMPATIBILITY_LAYER_INPUT_H
+#define COMPATIBILITY_LAYER_INPUT_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#define PHONEXR_INPUT_PORT 42425
+#define COMPATIBILITY_LAYER_INPUT_PORT 42425
 
-/* Биты phonexr_hand.buttons. */
-#define PHONEXR_BUTTON_PRIMARY (1u << 0)     /* A / X */
-#define PHONEXR_BUTTON_SECONDARY (1u << 1)   /* B / Y */
-#define PHONEXR_BUTTON_TRIGGER (1u << 2)
-#define PHONEXR_BUTTON_SQUEEZE (1u << 3)
-#define PHONEXR_BUTTON_MENU (1u << 4)
-#define PHONEXR_BUTTON_STICK_CLICK (1u << 5)
-#define PHONEXR_BUTTON_SYSTEM (1u << 6)
+/* Биты compatibility_layer_hand.buttons. */
+#define COMPATIBILITY_LAYER_BUTTON_PRIMARY (1u << 0)     /* A / X */
+#define COMPATIBILITY_LAYER_BUTTON_SECONDARY (1u << 1)   /* B / Y */
+#define COMPATIBILITY_LAYER_BUTTON_TRIGGER (1u << 2)
+#define COMPATIBILITY_LAYER_BUTTON_SQUEEZE (1u << 3)
+#define COMPATIBILITY_LAYER_BUTTON_MENU (1u << 4)
+#define COMPATIBILITY_LAYER_BUTTON_STICK_CLICK (1u << 5)
+#define COMPATIBILITY_LAYER_BUTTON_SYSTEM (1u << 6)
 
-/* Биты phonexr_state.flags. */
-#define PHONEXR_FLAG_SIX_DOF (1u << 0)   /* положение берётся с камеры */
-#define PHONEXR_FLAG_HANDS_ONLY (1u << 1) /* жесты пальцев ничего не нажимают */
+/* Биты compatibility_layer_state.flags. */
+#define COMPATIBILITY_LAYER_FLAG_SIX_DOF (1u << 0)   /* положение берётся с камеры */
+#define COMPATIBILITY_LAYER_FLAG_HANDS_ONLY (1u << 1) /* жесты пальцев ничего не нажимают */
 
-struct phonexr_hand
+struct compatibility_layer_hand
 {
 	bool present;              /* рука видна камере или подключён Joy-Con */
 	bool fist, index, thumb;   /* жесты; в режиме «только руки» всегда false */
@@ -50,27 +50,27 @@ struct phonexr_hand
 	float thumb_curl, index_curl, middle_curl, ring_curl, pinky_curl;
 };
 
-struct phonexr_state
+struct compatibility_layer_state
 {
-	struct phonexr_hand left;
-	struct phonexr_hand right;
+	struct compatibility_layer_hand left;
+	struct compatibility_layer_hand right;
 	uint32_t flags;
 };
 
-struct phonexr_input
+struct compatibility_layer_input
 {
 	int socket_fd;
 };
 
 /* Возвращает true, если удалось занять порт. */
-bool phonexr_input_open(struct phonexr_input *input, int port);
+bool compatibility_layer_input_open(struct compatibility_layer_input *input, int port);
 
 /* Забирает самый свежий пакет. Возвращает false, если новых данных нет. Не блокирует. */
-bool phonexr_input_poll(struct phonexr_input *input, struct phonexr_state *out_state);
+bool compatibility_layer_input_poll(struct compatibility_layer_input *input, struct compatibility_layer_state *out_state);
 
-void phonexr_input_close(struct phonexr_input *input);
+void compatibility_layer_input_close(struct compatibility_layer_input *input);
 
-#ifdef PHONEXR_INPUT_IMPLEMENTATION
+#ifdef COMPATIBILITY_LAYER_INPUT_IMPLEMENTATION
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -80,7 +80,7 @@ void phonexr_input_close(struct phonexr_input *input);
 #include <unistd.h>
 
 bool
-phonexr_input_open(struct phonexr_input *input, int port)
+compatibility_layer_input_open(struct compatibility_layer_input *input, int port)
 {
 	input->socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
 	if (input->socket_fd < 0) {
@@ -103,7 +103,7 @@ phonexr_input_open(struct phonexr_input *input, int port)
 }
 
 bool
-phonexr_input_poll(struct phonexr_input *input, struct phonexr_state *out_state)
+compatibility_layer_input_poll(struct compatibility_layer_input *input, struct compatibility_layer_state *out_state)
 {
 	if (input->socket_fd < 0) {
 		return false;
@@ -114,12 +114,12 @@ phonexr_input_poll(struct phonexr_input *input, struct phonexr_state *out_state)
 	/* Пакеты идут 60 раз в секунду: берём последний, накопившиеся пропускаем. */
 	while ((length = recv(input->socket_fd, packet, sizeof(packet) - 1, 0)) > 0) {
 		packet[length] = '\0';
-		struct phonexr_state parsed;
+		struct compatibility_layer_state parsed;
 		memset(&parsed, 0, sizeof(parsed));
 		int lp, lf, li, lt, lb, rp, rf, ri, rt, rb, fl;
 		int lpinch = 0, lpalm = 0, rpinch = 0, rpalm = 0;
-		struct phonexr_hand *l = &parsed.left;
-		struct phonexr_hand *r = &parsed.right;
+		struct compatibility_layer_hand *l = &parsed.left;
+		struct compatibility_layer_hand *r = &parsed.right;
 		/* PH6: PH5 plus five continuous finger curls in each hand block. */
 		int count = sscanf(packet,
 		                   "PH6 %d %d %d %d %f %f %f %f %f %f %f %d %f %f %f %f %f %f %f "
@@ -172,7 +172,7 @@ phonexr_input_poll(struct phonexr_input *input, struct phonexr_state *out_state)
 }
 
 void
-phonexr_input_close(struct phonexr_input *input)
+compatibility_layer_input_close(struct compatibility_layer_input *input)
 {
 	if (input->socket_fd >= 0) {
 		close(input->socket_fd);
@@ -180,5 +180,5 @@ phonexr_input_close(struct phonexr_input *input)
 	}
 }
 
-#endif /* PHONEXR_INPUT_IMPLEMENTATION */
-#endif /* PHONEXR_INPUT_H */
+#endif /* COMPATIBILITY_LAYER_INPUT_IMPLEMENTATION */
+#endif /* COMPATIBILITY_LAYER_INPUT_H */

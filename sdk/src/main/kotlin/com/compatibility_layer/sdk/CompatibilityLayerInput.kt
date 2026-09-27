@@ -1,19 +1,19 @@
-package com.phonexr.sdk
+package com.compatibility_layer.sdk
 
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
 
 /**
- * Читает поток PhoneXR: положение рук, жесты и кнопки Joy-Con.
+ * Читает поток Compatibility-Layer: положение рук, жесты и кнопки Joy-Con.
  *
  * Обычный ввод (позы контроллеров, кнопки) игра получает через CompatibilityLayer. Этот класс нужен, когда
  * хочется сырые данные: например, показать ладонь или сделать свой жест.
  *
- * Данные приходят по UDP на 127.0.0.1:42425, пока работает трекинг в PhoneXR.
+ * Данные приходят по UDP на 127.0.0.1:42425, пока работает трекинг в CompatibilityLayer.
  * Порт занимает один клиент: если игра не видит данных, значит их уже читает другое приложение.
  */
-class PhoneXRInput(port: Int = 42425) : AutoCloseable {
+class CompatibilityLayerInput(port: Int = 42425) : AutoCloseable {
     data class Hand(
         /** Рука видна камере или подключён Joy-Con этой стороны. */
         val present: Boolean = false,

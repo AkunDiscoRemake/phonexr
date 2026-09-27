@@ -11,7 +11,7 @@
 #include <cmath>
 #include <deque>
 
-namespace phonexr {
+namespace compatibility-layer {
 
 namespace {
 
@@ -301,9 +301,9 @@ floor_offset(const ovrMobile *ovr)
 	return floor ? kEyeHeight : 0.0f;
 }
 
-} // namespace phonexr
+} // namespace compatibility-layer
 
-using namespace phonexr;
+using namespace compatibility-layer;
 
 extern "C" {
 

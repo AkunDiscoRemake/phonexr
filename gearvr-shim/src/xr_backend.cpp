@@ -9,10 +9,10 @@
 
 #include <unistd.h>
 
-#define LOG(...) __android_log_print(ANDROID_LOG_INFO, "PhoneXR-GearVR", __VA_ARGS__)
+#define LOG(...) __android_log_print(ANDROID_LOG_INFO, "Compatibility-Layer-GearVR", __VA_ARGS__)
 #define FAIL(result, what) (LOG("%s failed: %d", what, static_cast<int>(result)), false)
 
-namespace phonexr {
+namespace compatibility-layer {
 
 namespace {
 
@@ -119,15 +119,15 @@ use_32bit_runtime(JavaVM *vm, jobject activity)
 		vm->DetachCurrentThread();
 	}
 	if (library.empty() || cache.empty()) {
-		LOG("No 32-bit PhoneXR runtime found; reinstall the runtime built with multiArch");
+		LOG("No 32-bit Compatibility-Layer runtime found; reinstall the runtime built with multiArch");
 		return;
 	}
-	const std::string manifest = cache + "/phonexr_runtime32.json";
+	const std::string manifest = cache + "/compatibility_layer_runtime32.json";
 	FILE *file = fopen(manifest.c_str(), "w");
 	if (file == nullptr) {
 		return;
 	}
-	fprintf(file, "{\"file_format_version\": \"1.0.0\", \"runtime\": {\"name\": \"PhoneXR\", \"library_path\": \"%s\"}}\n",
+	fprintf(file, "{\"file_format_version\": \"1.0.0\", \"runtime\": {\"name\": \"Compatibility-Layer\", \"library_path\": \"%s\"}}\n",
 	        library.c_str());
 	fclose(file);
 	setenv("XR_RUNTIME_JSON", manifest.c_str(), 1);
@@ -186,7 +186,7 @@ XrBackend::initialize(JavaVM *vm, jobject activity)
 
 	XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO};
 	info.next = &android;
-	std::strcpy(info.applicationInfo.applicationName, "PhoneXR Gear VR adapter");
+	std::strcpy(info.applicationInfo.applicationName, "Compatibility-Layer Gear VR adapter");
 	std::strcpy(info.applicationInfo.engineName, "VrApi");
 	info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
 	info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
@@ -264,7 +264,7 @@ XrBackend::create_actions()
 	menu_ = make_action(action_set_, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu", hands_.data());
 	thumbstick_ = make_action(action_set_, XR_ACTION_TYPE_VECTOR2F_INPUT, "thumbstick", "Thumbstick", hands_.data());
 
-	// PhoneXR presents Joy-Con and hands as Oculus Touch controllers.
+	// Compatibility-Layer presents Joy-Con and hands as Oculus Touch controllers.
 	const char *profile = "/interaction_profiles/oculus/touch_controller";
 	std::vector<XrActionSuggestedBinding> bindings = {
 	    {grip_pose_, path(instance_, "/user/hand/left/input/grip/pose")},
@@ -647,4 +647,4 @@ XrBackend::sync_input(XrTime time)
 	}
 }
 
-} // namespace phonexr
+} // namespace compatibility-layer

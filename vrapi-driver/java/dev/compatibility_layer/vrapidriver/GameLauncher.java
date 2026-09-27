@@ -1,4 +1,4 @@
-package dev.phonexr.vrapidriver;
+package dev.compatibility_layer.vrapidriver;
 
 import android.app.Activity;
 import android.content.ClipData;
@@ -8,8 +8,8 @@ import android.net.Uri;
 import android.os.Bundle;
 
 /**
- * Starts an unpatched VrApi game so that it can see this driver and PhoneXR Runtime. A game made for
- * Android 11+ sees only packages it asked for, or that granted it a content URI: PhoneXR Runtime
+ * Starts an unpatched VrApi game so that it can see this driver and Compatibility-Layer Runtime. A game made for
+ * Android 11+ sees only packages it asked for, or that granted it a content URI: Compatibility-Layer Runtime
  * starts this activity with a URI of its own, and the game is started from here with that URI and
  * one of this package — both become visible to it.
  */
@@ -21,7 +21,7 @@ public final class GameLauncher extends Activity {
         ComponentName component = name == null ? null : ComponentName.unflattenFromString(name);
         if (component != null) {
             Uri own = Uri.parse("content://" + VisibilityProvider.AUTHORITY + "/" + component.getPackageName());
-            ClipData clip = ClipData.newRawUri("PhoneXR", own);
+            ClipData clip = ClipData.newRawUri("Compatibility-Layer", own);
             ClipData received = getIntent().getClipData();
             if (received != null) {
                 for (int i = 0; i < received.getItemCount(); i++) {

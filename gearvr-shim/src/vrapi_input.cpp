@@ -1,13 +1,13 @@
 // Controllers of the VrApi layer.
 //
-// PhoneXR exposes Joy-Con and tracked hands as Oculus Touch controllers. In Gear VR mode the right
+// Compatibility-Layer exposes Joy-Con and tracked hands as Oculus Touch controllers. In Gear VR mode the right
 // one becomes the Gear VR Controller: trigger, touchpad (stick + A click) and back (B). In Quest
 // mode both hands are reported as Touch controllers.
 #include "vrapi_internal.h"
 
 #include <cmath>
 
-namespace phonexr {
+namespace compatibility-layer {
 
 namespace {
 
@@ -135,9 +135,9 @@ fill_remote_state(ovrMobile *ovr, int hand, const Controller &controller, ovrInp
 
 } // namespace
 
-} // namespace phonexr
+} // namespace compatibility-layer
 
-using namespace phonexr;
+using namespace compatibility-layer;
 
 extern "C" {
 

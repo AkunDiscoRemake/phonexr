@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Готовит PhoneXR Runtime — Compatibility-Layer-рантайм (Monado с патчем PhoneXR), который PhoneXR ставит сам.
+Готовит Compatibility-Layer Runtime — Compatibility-Layer-рантайм (Monado с патчем Compatibility-Layer), который Compatibility-Layer ставит сам.
 
-Берёт собранный APK рантайма (compatibility-layer-runtime/monado + monado-phonexr.patch) и:
-  * называет его «PhoneXR Runtime» везде (брокер Compatibility-Layer, лаунчер, служба), ставит иконку PhoneXR;
+Берёт собранный APK рантайма (compatibility-layer-runtime/monado + monado-compatibility-layer.patch) и:
+  * называет его «Compatibility-Layer Runtime» везде (брокер Compatibility-Layer, лаунчер, служба), ставит иконку Compatibility-Layer;
   * встраивает системный брокер Compatibility-Layer (broker/RuntimeBroker.java): игры с загрузчиком Khronos —
-    Android XR, Pico, новые Quest — находят PhoneXR Runtime сами, без патча;
+    Android XR, Pico, новые Quest — находят Compatibility-Layer Runtime сами, без патча;
   * встраивает GameLauncher: игры из магазина, которым package visibility прячет рантайм, запускаются
     через него с правом на URI рантайма — и видят его, тоже без патча;
   * убирает сборки для x86 и лишние символы из библиотек (≈97 МБ → ≈25 МБ);
-  * подписывает ключом PhoneXR и кладёт в app/src/main/assets/runtime/phonexr-runtime.apk.
+  * подписывает ключом Compatibility-Layer и кладёт в app/src/main/assets/runtime/compatibility-layer-runtime.apk.
 
   python3 compatibility-layer-runtime/build_runtime_apk.py [--apk путь/к/monado.apk]
 """
@@ -24,7 +24,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SDK = os.environ.get("ANDROID_HOME") or os.path.expanduser("~/Library/Android/sdk")
-NAME = "PhoneXR Runtime"
+NAME = "Compatibility-Layer Runtime"
 VERSION_CODE = 7
 
 
@@ -53,24 +53,24 @@ def rebrand(folder):
     strings = os.path.join(folder, "res", "values", "strings.xml")
     text = open(strings, encoding="utf-8").read()
     text = re.sub(r'(<string name="app_name">)[^<]*(</string>)', rf"\g<1>{NAME}\g<2>", text)
-    text = re.sub(r'(<string name="service_name">)[^<]*(</string>)', r"\g<1>PhoneXR Compatibility-Layer\g<2>", text)
+    text = re.sub(r'(<string name="service_name">)[^<]*(</string>)', r"\g<1>Compatibility-Layer\g<2>", text)
     open(strings, "w", encoding="utf-8").write(text)
 
     res = os.path.join(folder, "res")
     app_res = os.path.join(ROOT, "app", "src", "main", "res")
     os.makedirs(os.path.join(res, "drawable-nodpi"), exist_ok=True)
     shutil.copy(os.path.join(app_res, "drawable-nodpi", "ic_launcher_foreground.png"),
-                os.path.join(res, "drawable-nodpi", "phonexr_foreground.png"))
+                os.path.join(res, "drawable-nodpi", "compatibility_layer_foreground.png"))
     shutil.copy(os.path.join(app_res, "drawable", "ic_launcher_background_gradient.xml"),
-                os.path.join(res, "drawable", "phonexr_background.xml"))
+                os.path.join(res, "drawable", "compatibility_layer_background.xml"))
     adaptive = ('<?xml version="1.0" encoding="utf-8"?>\n'
                 '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
-                '    <background android:drawable="@drawable/phonexr_background" />\n'
-                '    <foreground android:drawable="@drawable/phonexr_foreground" />\n'
+                '    <background android:drawable="@drawable/compatibility_layer_background" />\n'
+                '    <foreground android:drawable="@drawable/compatibility_layer_foreground" />\n'
                 '</adaptive-icon>\n')
     for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
         open(os.path.join(res, "mipmap-anydpi", name), "w", encoding="utf-8").write(adaptive)
-    # Old launchers take the bitmaps: PhoneXR's own, in place of Monado's webp.
+    # Old launchers take the bitmaps: Compatibility-Layer's own, in place of Monado's webp.
     for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
         target = os.path.join(res, f"mipmap-{density}")
         for old in glob.glob(os.path.join(target, "ic_launcher*.webp")):
@@ -103,16 +103,16 @@ def add_broker(folder):
         shutil.copy(os.path.join(out, "classes.dex"), os.path.join(folder, f"classes{index}.dex"))
     manifest = os.path.join(folder, "AndroidManifest.xml")
     text = open(manifest, encoding="utf-8").read()
-    provider = ('<provider android:name="org.freedesktop.monado.phonexr.RuntimeBroker" '
+    provider = ('<provider android:name="org.freedesktop.monado.compatibility_layer.RuntimeBroker" '
                 'android:authorities="org.khronos.compatibility_layer.system_runtime_broker" android:exported="true"/>')
     if "system_runtime_broker" not in text:
         text = text.replace("</application>", provider + "</application>", 1)
     # Games from the store run unpatched: started from here with a URI grant, they can see the runtime.
-    launcher = ('<activity android:name="org.freedesktop.monado.phonexr.GameLauncher" android:exported="true" '
+    launcher = ('<activity android:name="org.freedesktop.monado.compatibility_layer.GameLauncher" android:exported="true" '
                 'android:excludeFromRecents="true" android:noHistory="true" '
                 'android:theme="@android:style/Theme.Translucent.NoTitleBar"/>'
-                '<provider android:name="org.freedesktop.monado.phonexr.VisibilityProvider" '
-                'android:authorities="org.freedesktop.monado.phonexr.visibility" android:exported="false" '
+                '<provider android:name="org.freedesktop.monado.compatibility_layer.VisibilityProvider" '
+                'android:authorities="org.freedesktop.monado.compatibility_layer.visibility" android:exported="false" '
                 'android:grantUriPermissions="true"/>')
     if "GameLauncher" not in text:
         text = text.replace("</application>", launcher + "</application>", 1)
@@ -140,7 +140,7 @@ def slim(folder):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--apk", default=os.path.join(ROOT, "VR-Android", "2-Monado-compatibility-layer-runtime.apk"))
-    parser.add_argument("-o", "--output", default=os.path.join(ROOT, "compatibility-layer-runtime", "prebuilt", "phonexr-runtime.apk"))
+    parser.add_argument("-o", "--output", default=os.path.join(ROOT, "compatibility-layer-runtime", "prebuilt", "compatibility-layer-runtime.apk"))
     arguments = parser.parse_args()
     with tempfile.TemporaryDirectory() as work:
         decoded = os.path.join(work, "decoded")
@@ -153,7 +153,7 @@ def main():
         aligned = os.path.join(work, "aligned.apk")
         subprocess.run([build_tool("zipalign"), "-P", "16", "-f", "4", unsigned, aligned], check=True)
         os.makedirs(os.path.dirname(arguments.output), exist_ok=True)
-        keystore = os.path.join(ROOT, "app", "src", "main", "assets", "phonexr-signing.p12")
+        keystore = os.path.join(ROOT, "app", "src", "main", "assets", "compatibility-layer-signing.p12")
         subprocess.run([build_tool("apksigner"), "sign", "--ks", keystore, "--ks-pass", "pass:android",
                         "--ks-key-alias", "androiddebugkey", "--key-pass", "pass:android",
                         "--out", arguments.output, aligned], check=True)
