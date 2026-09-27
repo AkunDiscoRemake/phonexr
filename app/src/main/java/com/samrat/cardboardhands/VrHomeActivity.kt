@@ -136,7 +136,8 @@ class VrHomeActivity : Activity(), LifecycleOwner {
     @Volatile private var arFrameMap: FloatArray? = null
     /** The latest ARCore camera frame, kept for "take a photo". */
     @Volatile private var arPhoto: Bitmap? = null
-    private val keyboard = KeyboardPanel()
+    // Material You: the wallpaper's tones, as the rest of the home.
+    private val keyboard by lazy { KeyboardPanel().apply { MaterialYouIcons.palette(this@VrHomeActivity, true).let { tint(it.tile, it.glyph) } } }
     private val keyboardRedraw = AtomicBoolean(true)
     @Volatile private var hoveredKey: String? = null
     /** Window the keyboard was opened for by hand (apps that cannot ask for it themselves). */
@@ -226,8 +227,9 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         return windows.firstOrNull { !it.minimized && it.content.keyboardRequested }
     }
 
-    private fun keyboardCenterY(window: VrWindow) =
-        window.height + frameBottom(window) - .06f - KEYBOARD_H / 2
+    /** As on Quest: close in front of the user, a little below the eyes — easy to reach and to read. */
+    @Suppress("UNUSED_PARAMETER")
+    private fun keyboardCenterY(window: VrWindow) = -.1f * distanceScale
 
     /** Height of the browser's top bar for [window], metres (0 for other windows). */
     private fun barHeight(window: VrWindow) =
@@ -3598,9 +3600,9 @@ class VrHomeActivity : Activity(), LifecycleOwner {
         private const val RAIN_DROPS = 700
         /** Rain falls through this many metres around the head. */
         private const val RAIN_HEIGHT = 4.4f
-        private const val KEYBOARD_W = 1.7f
+        private const val KEYBOARD_W = .78f
         private val KEYBOARD_H = KEYBOARD_W * KeyboardPanel.HEIGHT / KeyboardPanel.WIDTH
-        private const val KEYBOARD_RADIUS = 1.15f
+        private const val KEYBOARD_RADIUS = .75f
         /** The keyboard on a table: about the size of a real one. */
         private const val TABLE_KEYBOARD_W = .5f
         private val TABLE_KEYBOARD_H = TABLE_KEYBOARD_W * KeyboardPanel.HEIGHT / KeyboardPanel.WIDTH
